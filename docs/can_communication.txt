@@ -1,0 +1,25 @@
+开机连接检查openarmv1 CAN通信
+Ubuntu命令行操作：
+    检查USB连接：
+        lsusb
+    确认接口存在：
+        ip -brief link show type can
+    配置CAN通信：
+        sudo ip link set can0 down
+        sudo ip link set can0 type can \
+        bitrate 1000000 sample-point 0.75 \
+        dbitrate 5000000 dsample-point 0.75 dsjw 2 \
+        fd on restart-ms 0
+        sudo ip link set can0 up
+    检查状态：
+        ip -details -statistics link show can0
+    打开监听终端：
+        candump -x can0    
+    读取单个关节点电机状态：
+        openarm-can-cli -i can0 monitor --id 1
+        openarm-can-cli -i can0 monitor --id 2
+        openarm-can-cli -i can0 monitor --id 3
+        openarm-can-cli -i can0 monitor --id 4
+        openarm-can-cli -i can0 monitor --id 5
+        openarm-can-cli -i can0 monitor --id 6
+        openarm-can-cli -i can0 monitor --id 7
