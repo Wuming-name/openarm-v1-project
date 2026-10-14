@@ -1,0 +1,111 @@
+{
+  "motion_limits_reviewed": false,
+  "geometry_and_mass_reviewed": false,
+  "fall_protection_confirmed": false,
+  "feedback_is_joint_nm_confirmed": false,
+  "model_xml": "/home/lsk/openarm_v1_ws/src/openarm-v1-project/models/openarm_v1_right/openarm_v1_7dof.xml",
+  "joint_names": [
+    "openarm_right_joint1",
+    "openarm_right_joint2",
+    "openarm_right_joint3",
+    "openarm_right_joint4",
+    "openarm_right_joint5",
+    "openarm_right_joint6",
+    "openarm_right_joint7"
+  ],
+  "joint_sign": [
+    1,
+    1,
+    1,
+    1,
+    1,
+    1,
+    1
+  ],
+  "zero_offset_rad": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "zero_uncertainty_rad": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+  ],
+  "q_min_rad": [
+    -1.396263,
+    -0.17453267320510335,
+    -1.570796,
+    0.0,
+    -1.570796,
+    -0.785398,
+    -1.570796
+  ],
+  "q_max_rad": [
+    3.490659,
+    3.3161253267948965,
+    1.570796,
+    2.443461,
+    1.570796,
+    0.785398,
+    1.570796
+  ],
+  "kp": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+  ],
+  "kd": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+  ],
+  "torque_alarm_nm": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+  ],
+  "speed_alarm_rad_s": [
+    null,
+    null,
+    null,
+    null,
+    null,
+    null,
+    null
+  ],
+  "tracking_alarm_rad": 0.16,
+  "transit_speed_rad_s": 0.04,
+  "transit_accel_rad_s2": 0.08,
+  "temperature_alarm_c": 55,
+  "settle_timeout_s": 20,
+  "sample_seconds": 3,
+  "startup_tolerance_rad": 0.005,
+  "settle_position_error_rad": 0.04,
+  "settle_speed_rad_s": 0.04,
+  "settle_spread_rad": 0.003,
+  "stable_seconds": 1,
+  "minimum_valid_samples": 40,
+  "path_margin_rad": 0.02,
+  "gravity_alarm_fraction": 0.6
+}
