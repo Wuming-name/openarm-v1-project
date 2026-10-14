@@ -1,6 +1,13 @@
 编译和运行tools下的static_torque内程序的Ubuntu命令行操作
-    进入程序目录
+    进入程序目录：
         cd ~/openarm_v1_ws/src/openarm-v1-project/tools/static_torque
-    配置并编译
+    配置并编译：
         cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
         cmake --build build -j2
+    读取关节电机数据：
+        ./build/openarm_static_torque --diagnose --interface can0
+    无需先打开文件运行读取程序的命令行
+        /home/lsk/openarm_v1_ws/src/openarm-v1-project/tools/static_torque/build/openarm_static_torque --diagnose --interface can0
+
+读取到的数据存放的位置
+    /home/lsk/experiments/torque_compare
