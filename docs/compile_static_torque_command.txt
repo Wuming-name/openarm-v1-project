@@ -1,0 +1,6 @@
+编译和运行tools下的static_torque内程序的Ubuntu命令行操作
+    进入程序目录
+        cd ~/openarm_v1_ws/src/openarm-v1-project/tools/static_torque
+    配置并编译
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        cmake --build build -j2
