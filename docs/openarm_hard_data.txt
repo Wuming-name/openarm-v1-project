@@ -1,0 +1,9 @@
+openarm版本V1
+各个关节电机型号
+    J1  DM-J8009P-2EC
+    J2  DM-J8009P-2EC
+    J3  DM-J4340P-2EC  
+    J4  DM-J4340-2EC
+    J5  DM-J4310-2EC V1.1
+    J6  DM-J4310-2EC V1.1
+    J7  DM-J4310-2EC V1.1
