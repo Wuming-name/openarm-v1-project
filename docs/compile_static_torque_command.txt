@@ -9,5 +9,5 @@
     无需先打开文件运行读取程序的命令行
         /home/lsk/openarm_v1_ws/src/openarm-v1-project/tools/static_torque/build/openarm_static_torque --diagnose --interface can0
 
-读取到的数据存放的位置
-    /home/lsk/experiments/torque_compare
+    读取到的数据存放的位置
+        /home/lsk/experiments/torque_compare
