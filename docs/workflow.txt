@@ -1,0 +1,27 @@
+Git使用流程
+项目在ubuntu台式机上运行，windows笔记本上负责辅助
+为了保证两个电脑上的工程内容互通实时共享采用git管理该项目
+台式机上ROS 2、CAN 驱动和命令行工具属于主机环境
+
+Git的常用的命令：
+    动作	                          实际含义
+    Ctrl + S	              把编辑器中的修改写到本机文件
+    git add	                  选择哪些修改要进入本次记录
+    git commit	              在本机创建一条版本记录
+    git push	              把本机版本记录上传到 GitHub
+    git pull --ff-only	      把 GitHub 上的新版本取到本机
+
+Windows写操作记录，Ubuntu接着补充：
+    windows命令行：
+        cd /d D:\Projects\openarm-v1-project
+        git status
+    显示：
+        nothing to commit, working tree clean  
+    说明没有未提交的修改，可以拉取：
+        git pull --ff-only
+
+Ubuntu拉取修改后项目：
+    Ubuntu命令行：
+        cd ~/openarm_v1_ws/src/openarm-v1-project
+        git status
+        git pull --ff-only
