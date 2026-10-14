@@ -1,0 +1,14 @@
+build/
+install/
+log/
+devel/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+*.bag
+*.db3
+*.mcap
