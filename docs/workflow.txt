@@ -3,6 +3,10 @@ Git使用流程
 为了保证两个电脑上的工程内容互通实时共享采用git管理该项目
 台式机上ROS 2、CAN 驱动和命令行工具属于主机环境
 
+Windows和Ubuntu各自的工程文件位置
+    Windows：D:\Projects\openarm-v1-project
+    Ubuntu：/home/lsk/openarm_v1_ws/src/openarm-v1-project
+    
 Git的常用的命令：
     动作	                          实际含义
     Ctrl + S	              把编辑器中的修改写到本机文件
