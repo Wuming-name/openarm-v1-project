@@ -942,8 +942,14 @@ Settings load_settings(const Json& plan) {
     if (plan.at("schema") != "openarm-static-v1" || !plan.at("model_path_checked").get<bool>())
         throw std::runtime_error("Use torque_model.py prepare to create the plan first");
     const auto& cfg = plan.at("config");
-    for (const char* flag : {"motion_limits_reviewed", "geometry_and_mass_reviewed", "fall_protection_confirmed"})
-        if (!cfg.at(flag).get<bool>()) throw std::runtime_error(std::string("not confirmed: ") + flag);
+    const bool pilot=cfg.value("experiment_scope",std::string{})=="local_pilot_1deg";
+    if (pilot) {
+        if (!cfg.at("holding_gains_verified").get<bool>() || !cfg.at("fall_protection_confirmed").get<bool>())
+            throw std::runtime_error("pilot requires verified holding gains and fall protection");
+    } else {
+        for (const char* flag : {"motion_limits_reviewed", "geometry_and_mass_reviewed", "fall_protection_confirmed"})
+            if (!cfg.at(flag).get<bool>()) throw std::runtime_error(std::string("not confirmed: ") + flag);
+    }
     QMIN = vector7(cfg, "q_min_rad"); QMAX = vector7(cfg, "q_max_rad");
     KP = vector7(cfg, "kp"); KD = vector7(cfg, "kd");
     TORQUE_ALARM = vector7(cfg, "torque_alarm_nm"); SPEED_ALARM = vector7(cfg, "speed_alarm_rad_s");
@@ -970,6 +976,27 @@ Settings load_settings(const Json& plan) {
     if (s.min_samples < 10 || s.min_samples > s.dwell/PERIOD_S*0.9)
         throw std::runtime_error("minimum_valid_samples incompatible with dwell");
     for (double x : SPEED_ALARM) if (x <= s.speed) throw std::runtime_error("speed alarm must exceed transit speed");
+    if (pilot) {
+        const Vec origin=vector7(cfg,"pilot_baseline_q_motor_rad");
+        const Vec expected=vector7(plan,"baseline_q_motor_rad");
+        const Vec verified_kp{35,35,20,20,6,6,6}, verified_kd{4,4,2,2,0.8,0.8,0.8};
+        const Vec torque_caps{2,2,1.5,1.5,0.7,0.7,0.7};
+        for (int i=0;i<N;++i) {
+            if (std::abs(origin[i]-expected[i])>1e-9 || KP[i]!=verified_kp[i] || KD[i]!=verified_kd[i] ||
+                TORQUE_ALARM[i]>torque_caps[i] || SPEED_ALARM[i]>0.15 ||
+                QMIN[i]<origin[i]-0.120001 || QMAX[i]>origin[i]+0.120001)
+                throw std::runtime_error("pilot config exceeds verified gain/local envelope/alarm scope");
+        }
+        if (TRACK_ALARM>0.03 || s.speed>0.005 || s.accel>0.01)
+            throw std::runtime_error("pilot control thresholds exceed small-motion scope");
+        for (const auto& pose : plan.at("poses")) {
+            const Vec q=vector7(pose,"q_motor_rad");
+            double total=0;
+            for(int i=0;i<N;++i) total+=std::abs(q[i]-origin[i]);
+            if (total>0.017454) throw std::runtime_error("pilot target exceeds one-degree total offset");
+        }
+        std::cout << "LOCAL PILOT: nominal one-degree excursions; unknown mass/zero; exploratory data only.\n";
+    }
     return s;
 }
 void guard(const State& s, const Settings& settings, const Vec* target = nullptr) {
@@ -1103,7 +1130,7 @@ int main(int argc, char** argv) {
     Json metadata{{"completed",false},{"mode", execute ? "static_motion" : "diagnose"},
                   {"interface",CAN_INTERFACE},{"period_s",PERIOD_S},
                   {"torque_source","motor reported estimate; not a calibrated external torque sensor"},
-                  {"software_version","openarm-static-v1"}};
+                  {"software_version","openarm-static-v1-pilot1"}};
     try {
         if (output_root.empty()) {
             const char* home=std::getenv("HOME");

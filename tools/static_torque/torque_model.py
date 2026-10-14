@@ -50,13 +50,21 @@ def number(cfg, key, low, high):
 
 
 def validate_config(cfg):
-    for flag in ("motion_limits_reviewed", "geometry_and_mass_reviewed", "fall_protection_confirmed"):
+    pilot=cfg.get("experiment_scope")=="local_pilot_1deg"
+    flags=("holding_gains_verified","fall_protection_confirmed") if pilot else (
+        "motion_limits_reviewed", "geometry_and_mass_reviewed", "fall_protection_confirmed")
+    for flag in flags:
         if cfg.get(flag) is not True:
             raise ValueError(f"{flag} is not confirmed; template cannot authorize motion")
     low=vector7(cfg,"q_min_rad"); high=vector7(cfg,"q_max_rad")
     kp=vector7(cfg,"kp"); kd=vector7(cfg,"kd")
     torque=vector7(cfg,"torque_alarm_nm"); speed=vector7(cfg,"speed_alarm_rad_s")
-    uncertainty=vector7(cfg,"zero_uncertainty_rad")
+    if pilot:
+        if cfg.get("zero_uncertainty_rad")!=[None]*7:
+            raise ValueError("pilot must preserve unknown zero uncertainty as null")
+        uncertainty=[0]*7 # Schema check only; NOT a known/calibrated uncertainty bound.
+    else:
+        uncertainty=vector7(cfg,"zero_uncertainty_rad")
     for i in range(7):
         if not (-PMAX[i]<low[i]<high[i]<PMAX[i] and 0<kp[i]<=500 and 0<=kd[i]<=5
                 and 0<torque[i]<0.9*TMAX[i] and 0<speed[i]<=0.5 and 0<=uncertainty[i]<=0.2):
@@ -85,6 +93,16 @@ def validate_config(cfg):
     signs=vector7(cfg,"joint_sign"); vector7(cfg,"zero_offset_rad")
     if any(x not in (-1,1) for x in signs):
         raise ValueError("joint_sign must be +1/-1; this tool assumes output-shaft angles, unit transmission")
+    if pilot:
+        baseline=vector7(cfg,"pilot_baseline_q_motor_rad")
+        if kp!=[35,35,20,20,6,6,6] or kd!=[4,4,2,2,0.8,0.8,0.8]:
+            raise ValueError("pilot requires the holding gains verified by the operator")
+        caps=[2,2,1.5,1.5,0.7,0.7,0.7]
+        if any(torque[i]>caps[i] or speed[i]>0.15 or low[i]<baseline[i]-0.120001 or
+               high[i]>baseline[i]+0.120001 for i in range(7)):
+            raise ValueError("pilot software alarm/envelope exceeds initial small-motion scope")
+        if cfg["tracking_alarm_rad"]>0.03 or cfg["transit_speed_rad_s"]>0.005 or cfg["transit_accel_rad_s2"]>0.01:
+            raise ValueError("pilot tracking/speed/acceleration exceeds initial scope")
 
 
 class Model:
@@ -132,7 +150,10 @@ class Model:
         for i,x in enumerate(q):
             # Uncertain zero, possible servo tracking error, and startup variation are
             # included as a conservative limit margin, not a calibrated probability.
-            margin=cfg["path_margin_rad"]+cfg["zero_uncertainty_rad"][i]+cfg["tracking_alarm_rad"]+cfg["startup_tolerance_rad"]
+            uncertainty=cfg["zero_uncertainty_rad"][i]
+            # Pilot checks NOMINAL model travel only. Unknown zero errors are explicitly
+            # retained as null, so this is not proof of physical collision/limit clearance.
+            margin=cfg["path_margin_rad"]+(uncertainty if uncertainty is not None else 0)+cfg["tracking_alarm_rad"]+cfg["startup_tolerance_rad"]
             if not cfg["q_min_rad"][i]+margin<=x<=cfg["q_max_rad"][i]-margin:
                 raise ValueError(f"J{i+1}: insufficient reviewed travel margin at {x:.5f} rad")
             jid=self.ids[i]
@@ -251,7 +272,8 @@ def compare(args):
                         "model_passive_nm":passive[i],"residual_nm":tau[i]-gravity[i],
                         "mos_c":row[f"mos{i+1}"],"coil_c":row[f"coil{i+1}"],
                         "zero_sensitivity_nm_per_rad":gradients[i][i],
-                        "linear_zero_uncertainty_nm":sum(abs(gradients[i][j])*cfg["zero_uncertainty_rad"][j] for j in range(7))}
+                        "linear_zero_uncertainty_nm":(None if any(x is None for x in cfg["zero_uncertainty_rad"]) else
+                            sum(abs(gradients[i][j])*cfg["zero_uncertainty_rad"][j] for j in range(7)))}
                 writer.writerow(values)
                 groups.setdefault((row["pose_id"],i),[]).append(values)
             accepted+=1
@@ -264,7 +286,7 @@ def compare(args):
                         "feedback_std_nm":statistics.stdev(r["torque_feedback_nm"] for r in rows) if count>1 else 0,
                         "gravity_mean_nm":mean("model_gravity_nm"),"residual_mean_nm":mean("residual_nm"),
                         "rmse_nm":math.sqrt(statistics.fmean(r["residual_nm"]**2 for r in rows)),
-                        "zero_linear_bound_mean_nm":mean("linear_zero_uncertainty_nm")})
+                        "zero_linear_bound_mean_nm":(None if rows[0]["linear_zero_uncertainty_nm"] is None else mean("linear_zero_uncertainty_nm"))})
     if summary:
         with (out/"summary.csv").open("x",encoding="utf-8",newline="") as dest:
             writer=csv.DictWriter(dest,fieldnames=list(summary[0])); writer.writeheader(); writer.writerows(summary)
@@ -275,6 +297,7 @@ def compare(args):
             "dataset_complete":complete,"frozen_model_sha256":sha256(frozen),
             "zero_calibration_status":plan["zero_calibration_status"],
             "feedback_is_joint_nm_confirmed":cfg["feedback_is_joint_nm_confirmed"],
+            "experiment_scope":cfg.get("experiment_scope","reviewed_full"),
             "interpretation":"Residual includes zero/model/friction/current-to-torque errors; not a calibrated accuracy certificate. Zero bound is first-order only, not a guaranteed error bound."}
     save_json(out/"report.json",report)
     print(f"Comparison: {out}; valid rounds={accepted}; complete={complete}")
