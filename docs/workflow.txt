@@ -6,7 +6,7 @@ Git使用流程
 Windows和Ubuntu各自的工程文件位置
     Windows：D:\Projects\openarm-v1-project
     Ubuntu：/home/lsk/openarm_v1_ws/src/openarm-v1-project
-    
+
 Git的常用的命令：
     动作	                          实际含义
     Ctrl + S	              把编辑器中的修改写到本机文件
@@ -29,3 +29,12 @@ Ubuntu拉取修改后项目：
         cd ~/openarm_v1_ws/src/openarm-v1-project
         git status
         git pull --ff-only
+
+
+打开 VS Code 项目。
+点击左侧 “源代码管理” 图标，或按 Ctrl + Shift + G。
+确认“更改”列表为空。
+点击源代码管理面板中的 … →“拉取（Pull）”。
+等待完成，再编辑文件。
+如果更改列表不为空，说明本机有未提交修改，先处理这些修改，不要直接覆盖。
+
