@@ -1,0 +1,24 @@
+运行测量力矩程序的Ubuntu命令行:
+    进入目录并编译:
+        cd ~/openarm_v1_ws/src/openarm-v1-project/tools/static_torque
+        ls prepare_local_pilot.py
+        cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        cmake --build build -j2
+    配置CAN:
+        sudo ip link set can0 down
+        sudo ip link set can0 type can bitrate 1000000 sample-point 0.75 \
+            dbitrate 5000000 dsample-point 0.75 dsjw 2 fd on restart-ms 0
+        sudo ip link set can0 up
+        ip -details -statistics link show can0
+    生成本次运动计划：  
+        PILOT_DIR="$HOME/experiments/torque_compare/pilot_$(date +%Y%m%d_%H%M%S)"
+        .venv/bin/python prepare_local_pilot.py \
+        --snapshot latest \
+        --out "$PILOT_DIR"
+    启动运动采集：
+        ./build/openarm_static_torque \
+            --interface can0 \
+            --plan "$PILOT_DIR/plan.json" \
+            --execute
+    输入：
+        RUN_STATIC
