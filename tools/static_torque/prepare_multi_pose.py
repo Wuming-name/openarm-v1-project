@@ -45,14 +45,23 @@ def screen(model,cfg,baseline,target):
     try:
         for n in range(steps+1):
             q=[x+(y-x)*n/steps for x,y in zip(baseline,target)]
-            gravity=model.check_point(q,cfg)
+            try:
+                gravity=model.check_point(q,cfg)
+            except ValueError as exc:
+                raise ValueError(f'path sample {n}/{steps}: {exc}; q_rad={[round(x,6) for x in q]}') from exc
             for i,g in enumerate(gravity):
                 peak[i]=max(peak[i],abs(g))
                 nominal_pd_error[i]=max(nominal_pd_error[i],abs(g)/cfg['kp'][i])
         # A deliberately conservative nominal check; friction/feedback/model errors
         # can still prevent settling. Never enlarge settle/effort thresholds to pass.
         if max(nominal_pd_error)>cfg['settle_position_error_rad']:
-            raise ValueError('nominal gravity/KP exceeds holding-position tolerance; needs separate holding-control review')
+            j=max(range(7),key=lambda i:nominal_pd_error[i])
+            estimate=nominal_pd_error[j]; limit=cfg['settle_position_error_rad']
+            raise ValueError(f'J{j+1}: nominal gravity/KP exceeds holding-position tolerance; '
+                             f'peak_model_gravity={peak[j]:.6f} Nm, KP={cfg["kp"][j]:g}, '
+                             f'estimated_error={estimate:.6f} rad ({math.degrees(estimate):.3f}deg), '
+                             f'limit={limit:.6f} rad ({math.degrees(limit):.3f}deg). '
+                             'This is a model-based approximation, not measured holding error.')
         return True,'ok',peak,nominal_pd_error
     except ValueError as exc:
         return False,str(exc),peak,nominal_pd_error
@@ -78,6 +87,7 @@ def main():
     parser.add_argument('--out',type=Path)
     args=parser.parse_args()
     try:
+        print('prepare_multi_pose: detailed rejection diagnostics v2',flush=True)
         prior=previous_motion(args.previous_run.expanduser().resolve(strict=True))
         print('Previous actual excursions (one-degree TARGETS are not proof of one-degree actual motion):')
         for row in prior:
@@ -121,6 +131,10 @@ def main():
                     ok,reason,peak,error=screen(model,cfg,baseline,target)
                     assessment.append({'joint':i+1,'direction':direction,'angle_deg':angle,'accepted':ok,
                                        'reason':reason,'peak_gravity_nm':peak,'nominal_pd_error_rad':error})
+                    if not ok:
+                        print(f'  REJECT J{i+1} {direction*angle:+d}deg: {reason}')
+                        print('  Path peak gravity [J1..J7] Nm:',[round(x,6) for x in peak])
+                        print('  Estimated gravity/KP error [J1..J7] deg:',[round(math.degrees(x),4) for x in error])
                     if ok: best=(angle,target)
                 if best:
                     angle,target=best
@@ -130,7 +144,17 @@ def main():
                     print(f'J{i+1}: selected {direction*angle:+d}deg, then return to start.')
                 else:
                     print(f'J{i+1} direction {direction:+d}: no candidate passed existing limits; not enlarged.')
-        if len(poses)==1: raise ValueError('No candidate passed. Review prior actual motion and holding control; do not increase alarms blindly.')
+        if len(poses)==1:
+            rejected_out=args.out.expanduser().resolve()
+            rejected_out.mkdir(parents=True,exist_ok=False)
+            tm.save_json(rejected_out/'candidate_assessment.json',assessment)
+            tm.save_json(rejected_out/'rejection_context.json',{
+                'plan_created':False,'source_snapshot':str(snapshot),
+                'baseline_q_motor_rad':baseline,'model_xml':str(model_path),
+                'diagnostic_j7_start_probe':bool(args.probe_j7),'config':cfg,
+                'note':'No plan.json was created. Existing effort/gain/timing thresholds unchanged.'})
+            print('Rejection details saved:',rejected_out/'candidate_assessment.json',flush=True)
+            raise ValueError('No candidate passed. See the REJECT reason above; no motion plan created.')
         out=args.out.expanduser().resolve(); out.mkdir(parents=True,exist_ok=False)
         frozen=out/'model.mjb'; mujoco.mj_saveModel(model.model,str(frozen),None)
         tm.save_json(out/'multi_config.json',cfg); tm.save_json(out/'candidate_assessment.json',assessment)
