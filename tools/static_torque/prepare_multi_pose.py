@@ -39,10 +39,17 @@ def previous_motion(run):
     return results
 
 
-def screen(model,cfg,baseline,target):
+def screen(model,cfg,baseline,target,*,j7_probe=False):
     steps=max(1,math.ceil(max(abs(x-y) for x,y in zip(baseline,target))/0.002))
     peak=[0.0]*7; nominal_pd_error=[0.0]*7
     try:
+        baseline_gravity=None
+        if j7_probe:
+            if any(abs(target[i]-baseline[i])>1e-9 for i in range(6)) or not 0<target[6]-baseline[6]<=math.radians(3)+1e-9:
+                raise ValueError('incremental held-joint screening is only permitted for J7 positive <=3deg diagnostic')
+            # All absolute geometry/contact/gravity-headroom checks still apply.
+            # C++ must successfully establish measured initial holding before moving.
+            baseline_gravity=model.check_point(baseline,cfg)
         for n in range(steps+1):
             q=[x+(y-x)*n/steps for x,y in zip(baseline,target)]
             try:
@@ -51,13 +58,15 @@ def screen(model,cfg,baseline,target):
                 raise ValueError(f'path sample {n}/{steps}: {exc}; q_rad={[round(x,6) for x in q]}') from exc
             for i,g in enumerate(gravity):
                 peak[i]=max(peak[i],abs(g))
-                nominal_pd_error[i]=max(nominal_pd_error[i],abs(g)/cfg['kp'][i])
+                load=(g-baseline_gravity[i]) if j7_probe and i!=6 else g
+                nominal_pd_error[i]=max(nominal_pd_error[i],abs(load)/cfg['kp'][i])
         # A deliberately conservative nominal check; friction/feedback/model errors
         # can still prevent settling. Never enlarge settle/effort thresholds to pass.
         if max(nominal_pd_error)>cfg['settle_position_error_rad']:
             j=max(range(7),key=lambda i:nominal_pd_error[i])
             estimate=nominal_pd_error[j]; limit=cfg['settle_position_error_rad']
-            raise ValueError(f'J{j+1}: nominal gravity/KP exceeds holding-position tolerance; '
+            rule='model gravity CHANGE/KP' if j7_probe and j!=6 else 'nominal gravity/KP'
+            raise ValueError(f'J{j+1}: {rule} exceeds holding-position tolerance; '
                              f'peak_model_gravity={peak[j]:.6f} Nm, KP={cfg["kp"][j]:g}, '
                              f'estimated_error={estimate:.6f} rad ({math.degrees(estimate):.3f}deg), '
                              f'limit={limit:.6f} rad ({math.degrees(limit):.3f}deg). '
@@ -87,7 +96,7 @@ def main():
     parser.add_argument('--out',type=Path)
     args=parser.parse_args()
     try:
-        print('prepare_multi_pose: detailed rejection diagnostics v2',flush=True)
+        print('prepare_multi_pose: J7 held-baseline screening fix v3',flush=True)
         prior=previous_motion(args.previous_run.expanduser().resolve(strict=True))
         print('Previous actual excursions (one-degree TARGETS are not proof of one-degree actual motion):')
         for row in prior:
@@ -124,17 +133,20 @@ def main():
             if args.probe_j7:
                 print('J7 DIAGNOSTIC ONLY: +3deg; earlier 0.229deg was insufficient for general multi-pose approval.')
                 print('KP/KD, speed, tracking and effort alarms unchanged. Other joint TARGETS remain fixed.')
+                print('J7 uses absolute model gravity/KP. Held J1-J6 use gravity CHANGE/KP from current start.')
+                print('All absolute model headroom/contact/limit checks and C++ measured initial-hold checks remain active.')
             for direction in ((1,) if args.probe_j7 else (-1,1)):
                 best=None
                 for angle in angles:
                     target=baseline.copy(); target[i]+=direction*math.radians(angle)
-                    ok,reason,peak,error=screen(model,cfg,baseline,target)
+                    ok,reason,peak,error=screen(model,cfg,baseline,target,j7_probe=args.probe_j7)
                     assessment.append({'joint':i+1,'direction':direction,'angle_deg':angle,'accepted':ok,
-                                       'reason':reason,'peak_gravity_nm':peak,'nominal_pd_error_rad':error})
+                                       'reason':reason,'peak_gravity_nm':peak,'nominal_pd_error_rad':error,
+                                       'error_estimate_rule':('J7 absolute, J1-J6 increment from held baseline' if args.probe_j7 else 'absolute model gravity/KP')})
                     if not ok:
                         print(f'  REJECT J{i+1} {direction*angle:+d}deg: {reason}')
                         print('  Path peak gravity [J1..J7] Nm:',[round(x,6) for x in peak])
-                        print('  Estimated gravity/KP error [J1..J7] deg:',[round(math.degrees(x),4) for x in error])
+                        print('  Estimated screening error [J1..J7] deg:',[round(math.degrees(x),4) for x in error])
                     if ok: best=(angle,target)
                 if best:
                     angle,target=best
@@ -168,6 +180,7 @@ def main():
               'model_xml_sha256':tm.sha256(model_path),'mujoco_version':mujoco.__version__,
               'source_snapshot':str(snapshot),'previous_run':str(args.previous_run),
               'diagnostic_j7_start_probe':bool(args.probe_j7),
+              'holding_screening_rule':('J7 absolute gravity/KP; held J1-J6 gravity change/KP; real initial hold required by controller' if args.probe_j7 else 'absolute model gravity/KP'),
               'config_sha256':tm.sha256(out/'multi_config.json'),'poses_sha256':tm.sha256(out/'multi_poses.csv'),
               'zero_calibration_status':'unknown accuracy; no numerical uncertainty bound established',
               'limitations':'screened single-joint excursions only; physical limits/masses/zero not calibrated; collision exclusions remain active'}

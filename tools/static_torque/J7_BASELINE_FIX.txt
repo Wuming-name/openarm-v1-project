@@ -1,0 +1,47 @@
+J7 诊断准备判据修正 v3
+2026-10-15
+
+已定位之前拒绝的原因：
+程序把 J4 的模型重力峰值 0.701147 Nm 除以 KP=20，
+得出 0.035057 rad（2.009°），大于稳定位置容差0.025 rad（1.432°），
+即使只改变J7，也据此拒绝了候选。
+
+该模型估算不等于实测保持误差：它没有包含静摩擦等作用，
+也没有求解真实的耦合静态平衡，不能据此认定J4实际保持失败。
+此前实机记录中的J4在固定目标下保持稳定。
+
+本修正仅针对 --probe-j7：
+- 移动关节J7仍检查绝对模型重力/KP。
+- 目标未变的J1～J6检查相对起点的模型重力变化/KP。
+- 所有路径点仍检查绝对模型重力余量、模型限位、裕量、接触和被动力。
+- C++仍须先通过七关节实际初始保持检查，再开始目标转移。
+- 增益、0.7Nm的J7软件报警、0.03rad跟踪报警、0.025rad稳定误差阈值、速度均未改变。
+- 候选仍仅为J7正向3°，不扩大其他关节。
+- 一般多姿态模式的筛选没有随此改变。
+
+只覆盖 Ubuntu tools/static_torque/prepare_multi_pose.py，不需要重编译C++。
+需要沿用此前多姿态更新版C++；若初始实际保持或后续保护触发，仍会中止并尝试失能。
+机械保护始终有效，正常采样时不承重；本修正不证明模型和机械边界准确。
+
+同一Ubuntu终端：
+
+cd ~/openarm_v1_ws/src/openarm-v1-project/tools/static_torque
+./build/openarm_static_torque --diagnose --interface can0
+
+诊断成功后保持位置不变，立即执行：
+
+PROBE_DIR="$HOME/experiments/torque_compare/j7_probe_$(date +%Y%m%d_%H%M%S)"
+.venv/bin/python prepare_multi_pose.py \
+  --previous-run "$HOME/experiments/torque_compare/static_1792044758710916613" \
+  --snapshot latest --probe-j7 --out "$PROBE_DIR"
+
+应显示版本“J7 held-baseline screening fix v3”。
+只有准备成功且现场运动范围检查后，才执行：
+
+./build/openarm_static_torque --interface can0 --plan "$PROBE_DIR/plan.json" --execute
+
+输入RUN_STATIC才启动。结束承托后输入SUPPORTED。
+出现新的拒绝、跟踪/力矩报警或实际不动，保留报错，不继续加大阈值。
+
+验证：含用户报告数值的回归用例在内，共11项离线测试通过；
+本次修正尚未在实机上验证，不保证候选一定通过或电机一定能够转动。
