@@ -231,6 +231,21 @@ def distinct_means_ok(summary,pose_names,minimum):
     return len(vectors)==50
 
 
+def row_in_accepted_window(row,meta):
+    """Legacy data has no segments. New data must name a committed window."""
+    schema=meta.get('sampling_schema')
+    if schema is None:
+        return True
+    if schema!='continuous-window-v1':
+        return False
+    window=meta.get('accepted_sample_windows',{}).get(row.get('pose_id'))
+    if not isinstance(window,dict):
+        return False
+    segment=window.get('segment')
+    return (type(segment) is int and segment>0 and
+            str(row.get('sample_segment',''))==str(segment))
+
+
 def prepare(args):
     cfg=read_json(args.config); validate_config(cfg)
     snapshot=read_json(args.snapshot)
@@ -288,6 +303,7 @@ def compare(args):
         reader=csv.DictReader(stream); writer=csv.DictWriter(dest,fieldnames=fields); writer.writeheader()
         for row in reader:
             if row["stage"]!="sample": continue
+            if not row_in_accepted_window(row,meta): rejected+=1; continue
             if row['pose_id'] in failed_movement: rejected+=1; continue
             q=[float(row[f"q{i}"]) for i in range(1,8)]
             dq=[float(row[f"dq{i}"]) for i in range(1,8)]
@@ -364,6 +380,9 @@ def compare(args):
             "movement_checks":meta.get('movement_checks',[]),
             "pose_checks":meta.get('pose_checks',[]),
             "valid_distinct_pose_count":meta.get('valid_distinct_pose_count'),
+            "sampling_schema":meta.get('sampling_schema'),
+            "accepted_sample_windows":meta.get('accepted_sample_windows',{}),
+            "sample_window_rejections":meta.get('sample_window_rejections',[]),
             "interpretation":"Residual includes zero/model/friction/current-to-torque errors; not a calibrated accuracy certificate. Zero bound is first-order only, not a guaranteed error bound."}
     save_json(out/"report.json",report)
     print(f"Comparison: {out}; valid rounds={accepted}; complete={complete}")

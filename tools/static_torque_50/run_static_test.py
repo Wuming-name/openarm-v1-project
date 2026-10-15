@@ -20,7 +20,7 @@ import sys
 import time
 
 HERE = Path(__file__).resolve().parent
-VERSION = 'openarm-static-v1-multi4-static50'
+VERSION = 'openarm-static-v1-multi5-resettle'
 
 
 def run(command):
@@ -92,6 +92,7 @@ def ensure_build():
 
 
 def summarize(run_dir, meta):
+    from torque_model import row_in_accepted_window
     print('\nResult directory:', run_dir, flush=True)
     print('Completed:', meta.get('completed'), 'Error:', meta.get('error', 'none'), flush=True)
     samples_path = run_dir / 'samples.csv'
@@ -100,8 +101,11 @@ def summarize(run_dir, meta):
             rows = list(csv.DictReader(stream))
     else:
         rows = []  # Parameter verification can fail before Recorder exists.
-    samples = Counter(r['pose_id'] for r in rows if r['stage'] == 'sample' and r['stable'] == '1')
-    print('Stable samples by pose:', dict(samples), flush=True)
+    samples = Counter(r['pose_id'] for r in rows if r['stage'] == 'sample' and r['stable'] == '1'
+                      and row_in_accepted_window(r,meta))
+    print('Accepted stable samples by pose:', dict(samples), flush=True)
+    if meta.get('last_sampling_quality_event'):
+        print('Last sampling quality event:',json.dumps(meta['last_sampling_quality_event'],ensure_ascii=False),flush=True)
     fault = meta.get('safety_fault')
     if fault:
         print('Exact captured fault (not merely the last safe CSV row):', flush=True)

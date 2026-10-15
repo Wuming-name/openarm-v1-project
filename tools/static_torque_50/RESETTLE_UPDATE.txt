@@ -1,0 +1,55 @@
+50 姿态采样修复：openarm-static-v1-multi5-resettle
+
+针对旧版出现：
+  pose_01 采到 3 条后 STOP: pose became unstable during acquisition
+
+这条旧信息只表明稳定性判据不满足，无法判断具体是哪个关节的角度误差、速度、
+窗口位置波动、采样间隔或反馈时序导致。不能据此认定 CAN 断线、力矩不足或机械碰撞。
+
+旧逻辑的缺陷：进入采样后，只要某个周期不再满足稳定判据，就直接抛异常退出。
+修复后：
+1. 保持同一个目标位置，不重新运动、不改 KP/KD、不改速度和任何阈值。
+2. 该段采样作废；重新等待连续 1 秒稳定，再从零开始连续 3 秒采样。
+3. 每个姿态从进入保持阶段起，总等待时间最多 30+3=33 秒，超时仍停止。
+   时间不包含前往该姿态的转移过程；控制周期等可能带来一个周期的边界差异。
+4. 角度、跟踪、速度、力矩、温度等逐周期保护及严重通信异常仍立即停止。
+5. 原始 CSV 新增 sample_segment，保存每次采样段编号。
+6. metadata.json 的 accepted_sample_windows 只提交真正完整的合格段。
+7. torque_model.py 只分析已提交段；作废段即使当时 stable=1，也不会混入均值。
+8. 超时及作废时打印具体关节与判据，并保存 last_sampling_quality_event，
+   包含实际角度、目标角度、速度、窗口波动、采样间隔、时序和对应阈值。
+
+典型输出：
+pose_01: discard sample segment 1; ["J2:settle_velocity"]; holding SAME target ...
+pose_01: 60 stable samples accepted from segment 2
+Verified distinct measured pose 1/50
+
+判据含义：
+settle_position_error    实际与目标角度误差超过稳定采样要求
+settle_velocity          反馈速度超过稳定采样要求
+settle_position_spread   稳定窗口内角度变化超过要求
+feedback_sample_gap     同一关节反馈时间间隔不合格
+control_sample_gap      控制采样间隔不合格
+feedback_sample_timing  本轮反馈时序质量不合格
+这些采样质量判据与机械运动保护不同；机械运动保护没有取消。
+
+安装：
+把 openarm_static_50_resettle_update.zip 复制到 /home/lsk/。
+cd ~/openarm_v1_ws/src/openarm-v1-project/tools/static_torque_50
+tar -czf "$HOME/static50_before_resettle_$(date +%Y%m%d_%H%M%S).tar.gz" openarm_static_torque.cpp run_static_test.py torque_model.py
+python3 -m zipfile -e "$HOME/openarm_static_50_resettle_update.zip" "$PWD"
+
+运行（自动重新编译，不需重建虚拟环境）：
+.venv/bin/python -u run_static_50.py --setup-can --execute --max-angle-deg 20
+可在另一个终端只查看编译结果版本：
+./build/openarm_static_torque --version
+应显示 openarm-static-v1-multi5-resettle。
+关闭其他 CAN 工具；初始失能且已支撑，RUN_STATIC 前移除测量时承重接触并保留防坠。
+结束安装支撑再 SUPPORTED；异常失能仅尽力发送，仍需确认真实状态。
+
+修改文件：openarm_static_torque.cpp、run_static_test.py、torque_model.py。
+旧数据目录保留，不修改、不自动继续未完成的旧计划。
+此修复不承诺实机能通过稳定性要求；若一直不稳定，新日志将给出具体原因。
+
+验证：新增 8 项离线采样段筛选/均值隔离测试通过，原有数据比较和启动流程回归通过。
+Linux C++ 未在本地编译，未在真实机械臂上运行；Ubuntu 入口先自动编译再访问 CAN。

@@ -1044,6 +1044,9 @@ Settings load_settings(const Json& plan) {
     return s;
 }
 Json last_safety_fault;
+Json accepted_sample_windows=Json::object();
+Json last_quality_event;
+Json sample_window_rejections=Json::array();
 std::string safety_phase="startup", safety_pose="startup";
 Json fault_state(const State& s, const Vec* target) {
     Json result{{"time_s",s.time_s},{"q_rad",s.q},{"dq_rad_s",s.dq},{"tau_feedback_nm",s.tau},
@@ -1111,16 +1114,16 @@ public:
         out_ << std::setprecision(12) << "time_s,stage,pose_id,stable,transaction_ms,rx_skew_ms,max_kernel_age_ms,cycle_gap_ms";
         for (const auto& prefix : {"q", "dq", "tau", "cmd", "rx", "status", "mos", "coil"})
             for (int i = 1; i <= N; ++i) out_ << ',' << prefix << i;
-        out_ << '\n'; out_.flush();
+        out_ << ",sample_segment\n"; out_.flush();
     }
     void row(const State& s, const std::string& stage, const std::string& pose, bool valid,
-             const Vec& target, double gap) {
+             const Vec& target, double gap, int sample_segment=0) {
         out_ << s.time_s << ',' << stage << ',' << pose << ',' << valid << ',' << s.transaction_ms << ','
              << s.rx_skew_ms << ',' << s.max_kernel_age_ms << ',' << gap;
         for (const auto& values : {s.q, s.dq, s.tau, target, s.rx_time}) for (double x : values) out_ << ',' << x;
         for (int x : s.status) out_ << ',' << x;
         for (const auto& values : {s.mos, s.coil}) for (double x : values) out_ << ',' << x;
-        out_ << '\n'; out_.flush();
+        out_ << ',' << sample_segment << '\n'; out_.flush();
         if (!out_) throw std::runtime_error("sample log write failed");
     }
 private:
@@ -1155,8 +1158,10 @@ void hold_static(Arm& arm, State& current, const Vec& target, const Settings& se
                  Vec* sampled_mean = nullptr) {
     const auto start = Clock::now();
     std::deque<State> history;
+    last_quality_event=Json::object();
     bool sampling = false;
     int valid_count = 0;
+    int segment=0, restarts=0;
     Vec sum{};
     Clock::time_point sample_start{};
     const size_t window = size_t(std::ceil(settings.stable_seconds/PERIOD_S))+1;
@@ -1164,42 +1169,94 @@ void hold_static(Arm& arm, State& current, const Vec& target, const Settings& se
         safety_phase=sampling && collect ? "sample" : "settle"; safety_pose=pose;
         cycle.begin(); predicted_guard(current, target);
         current = arm.command(target); guard(current, settings, &target);
+        Json reasons=Json::array();
+        Vec feedback_gaps{};
+        if(!current.sample_valid) reasons.push_back("feedback_sample_timing");
+        if(cycle.gap_ms>1000*MAX_SAMPLE_GAP_S) reasons.push_back("control_sample_gap");
         bool good = current.sample_valid && cycle.gap_ms <= 1000*MAX_SAMPLE_GAP_S;
         for (int i=0; i<N; ++i) {
-            good = good && std::abs(current.q[i]-target[i]) <= settings.position_error &&
-                   std::abs(current.dq[i]) <= settings.still_speed;
+            if(std::abs(current.q[i]-target[i])>settings.position_error) {
+                reasons.push_back("J"+std::to_string(i+1)+":settle_position_error"); good=false;
+            }
+            if(std::abs(current.dq[i])>settings.still_speed) {
+                reasons.push_back("J"+std::to_string(i+1)+":settle_velocity"); good=false;
+            }
             if (!history.empty()) {
                 const double dt = current.rx_time[i] - history.back().rx_time[i];
-                good = good && dt > 0 && dt <= MAX_SAMPLE_GAP_S;
+                feedback_gaps[i]=dt;
+                if(!(dt>0 && dt<=MAX_SAMPLE_GAP_S)) {
+                    reasons.push_back("J"+std::to_string(i+1)+":feedback_sample_gap"); good=false;
+                }
             }
         }
         if (!good) history.clear(); else history.push_back(current);
         while (history.size() > window) history.pop_front();
         bool stable = history.size() == window;
+        Vec spreads{};
         if (stable) {
             for (int i=0; i<N; ++i) {
                 double low = current.q[i], high = low;
                 for (const auto& h : history) { low=std::min(low,h.q[i]); high=std::max(high,h.q[i]); }
-                if (high-low > settings.position_spread) stable=false;
+                spreads[i]=high-low;
+                if (high-low > settings.position_spread) {
+                    stable=false;
+                    reasons.push_back("J"+std::to_string(i+1)+":settle_position_spread");
+                }
             }
         }
-        if (stable && !sampling) { sampling=true; sample_start=Clock::now(); }
+        if(!reasons.empty()) {
+            last_quality_event=fault_state(current,&target);
+            last_quality_event["kind"]="sampling_quality";
+            last_quality_event["reasons"]=reasons;
+            last_quality_event["position_spread_rad"]=spreads;
+            last_quality_event["history_size"]=history.size();
+            last_quality_event["feedback_gap_s"]=feedback_gaps;
+            last_quality_event["sample_valid"]=current.sample_valid;
+            last_quality_event["cycle_gap_ms"]=cycle.gap_ms;
+            last_quality_event["max_kernel_age_ms"]=current.max_kernel_age_ms;
+            last_quality_event["limits"]={{"position_error_rad",settings.position_error},
+                {"velocity_rad_s",settings.still_speed},{"position_spread_rad",settings.position_spread},
+                {"sample_gap_ms",1000*MAX_SAMPLE_GAP_S},{"timeout_s",settings.settle_timeout+settings.dwell}};
+        }
+        if (sampling && !stable) {
+            ++restarts;
+            if(sample_window_rejections.size()<20) {
+                Json event=last_quality_event;
+                event["rejected_segment"]=segment; event["restarts"]=restarts;
+                sample_window_rejections.push_back(event);
+            }
+            if(restarts<=3 || restarts%10==0)
+                std::cout << pose << ": discard sample segment " << segment << "; " << reasons.dump()
+                          << "; holding SAME target, waiting for a new continuous stable window\n";
+            // This is a sampling-quality reset, not a new motion attempt. All
+            // per-cycle safety guards remain active at the unchanged target.
+            sampling=false; valid_count=0; sum=Vec{}; history.clear();
+        }
+        if (stable && !sampling) {
+            sampling=true; ++segment; valid_count=0; sum=Vec{}; sample_start=Clock::now();
+        }
         const bool valid = sampling && stable && collect;
-        log.row(current, sampling && collect ? "sample" : "settle", pose, valid, target, cycle.gap_ms);
+        log.row(current, sampling && collect ? "sample" : "settle", pose, valid, target, cycle.gap_ms,segment);
         if (valid) {
             ++valid_count;
             for(int i=0;i<N;++i) sum[i]+=current.q[i];
         }
-        if (sampling && !stable) throw std::runtime_error("pose became unstable during acquisition");
         cycle.finish(arm);
         if (stable && !collect) return;
         if (sampling && elapsed(Clock::now(), sample_start) >= settings.dwell) {
             if (valid_count < settings.min_samples) throw std::runtime_error("too few valid pose samples");
             if(sampled_mean) for(int i=0;i<N;++i) (*sampled_mean)[i]=sum[i]/valid_count;
-            std::cout << pose << ": " << valid_count << " stable samples saved\n"; return;
+            accepted_sample_windows[pose]={{"segment",segment},{"valid_count",valid_count},{"restarts",restarts}};
+            std::cout << pose << ": " << valid_count << " stable samples accepted from segment " << segment << '\n'; return;
         }
-        if (!sampling && elapsed(Clock::now(), start) > settings.settle_timeout)
-            throw std::runtime_error("pose failed to settle; do not raise gains blindly");
+        if (elapsed(Clock::now(),start)>settings.settle_timeout+settings.dwell) {
+            last_safety_fault=fault_state(current,&target);
+            last_safety_fault["kind"]="sampling_quality_timeout";
+            last_safety_fault["last_quality_event"]=last_quality_event;
+            last_safety_fault["restarts"]=restarts;
+            throw std::runtime_error("continuous stable sample window timed out at "+pose+
+                                     "; last reasons="+last_quality_event.value("reasons",Json::array()).dump());
+        }
     }
 }
 } // namespace
@@ -1211,7 +1268,7 @@ int main(int argc, char** argv) {
     for (int n=1; n<argc; ++n) {
         const std::string arg=argv[n];
         if (arg=="--version") {
-            std::cout << "openarm-static-v1-multi4-static50\n"; return 0;
+            std::cout << "openarm-static-v1-multi5-resettle\n"; return 0;
         } else if (arg=="--help") {
             std::cout << "openarm_static_torque [--diagnose] [--interface can0] [--output-root DIR]\n"
                          "openarm_static_torque --plan PLAN.json --execute [--interface can0]\n"; return 0;
@@ -1230,7 +1287,8 @@ int main(int argc, char** argv) {
     Json metadata{{"completed",false},{"mode", execute ? "static_motion" : "diagnose"},
                   {"interface",CAN_INTERFACE},{"period_s",PERIOD_S},
                   {"torque_source","motor reported estimate; not a calibrated external torque sensor"},
-                  {"software_version","openarm-static-v1-multi4-static50"}};
+                  {"software_version","openarm-static-v1-multi5-resettle"},
+                  {"sampling_schema","continuous-window-v1"}};
     try {
         if (output_root.empty()) {
             const char* home=std::getenv("HOME");
@@ -1311,6 +1369,8 @@ int main(int argc, char** argv) {
             move_static(arm,current,target,settings,log,cycle,name);
             Vec measured_mean{};
             hold_static(arm,current,target,settings,log,cycle,name,true,&measured_mean);
+            metadata["accepted_sample_windows"]=accepted_sample_windows;
+            metadata["sample_window_rejections"]=sample_window_rejections;
             if(verify_50) {
                 const double minimum=plan.at("config").at("minimum_distinct_pose_rad").get<double>();
                 double nearest=1e100, actual_shift=0, requested_shift=0;
@@ -1381,12 +1441,17 @@ int main(int argc, char** argv) {
             cycle.finish(arm);
         }
         metadata["completed"]=true; metadata["stop_reason"]="supported_normal_exit";
+        metadata["accepted_sample_windows"]=accepted_sample_windows;
+        metadata["sample_window_rejections"]=sample_window_rejections;
         write_json(run_dir/"metadata.json",metadata);
         return 0; // Destructor now attempts disable. Physical support is required.
     } catch(const std::exception& e) {
         std::cerr << "STOP: " << e.what() << "\nIf motors were enabled, bounded best-effort disable was attempted.\n"
                      "No acknowledgement/safe stop guarantee: check physical protection and motor state.\n";
         metadata["error"]=e.what();
+        metadata["accepted_sample_windows"]=accepted_sample_windows;
+        metadata["sample_window_rejections"]=sample_window_rejections;
+        if(!last_quality_event.is_null()) metadata["last_sampling_quality_event"]=last_quality_event;
         if (!last_safety_fault.is_null()) metadata["safety_fault"]=last_safety_fault;
         if(!run_dir.empty()) { try { write_json(run_dir/"metadata.json",metadata); } catch(...) {} }
         return 1;
