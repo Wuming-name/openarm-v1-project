@@ -58,10 +58,19 @@ def screen(model,cfg,baseline,target):
         return False,str(exc),peak,nominal_pd_error
 
 
+def eligible_for_j7_probe(row):
+    # Separate diagnostic scope, NOT general permission to enlarge all joints.
+    # J7 previously showed measurable positive movement AND an effort response.
+    return (row.get('joint')==7 and row.get('actual_previous_delta_deg',0)>=0.05 and
+            row.get('torque_after_nm',0)-row.get('torque_before_nm',0)>=0.02)
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--previous-run',required=True,type=Path)
     parser.add_argument('--report-only',action='store_true')
+    parser.add_argument('--probe-j7',action='store_true',
+                        help='Diagnostic J7 +3deg only, with unchanged alarms/gains; not a general multi-pose approval')
     parser.add_argument('--snapshot',default='latest')
     parser.add_argument('--log-root',type=Path,default=Path.home()/'experiments/torque_compare')
     parser.add_argument('--model',type=Path,default=Path.home()/'openarm_v1_ws/src/openarm-v1-project/models/openarm_v1_right/openarm_v1_7dof.xml')
@@ -94,13 +103,18 @@ def main():
         tm.validate_config(cfg)
         model=tm.Model(cfg,model_path)
         model.check_point(baseline,cfg)
-        angles=[d for d in (3,5,10,15) if d<=args.max_angle_deg]
+        angles=[3] if args.probe_j7 else [d for d in (3,5,10,15) if d<=args.max_angle_deg]
         poses=[{'pose_id':'multi_base_initial','q_motor_rad':baseline.copy()}]
         assessment=[]
         for i in range(7):
-            if not prior[i]['eligible']:
+            if args.probe_j7 and i!=6: continue
+            diagnostic_exception=args.probe_j7 and eligible_for_j7_probe(prior[i])
+            if not prior[i]['eligible'] and not diagnostic_exception:
                 print(f'J{i+1} skipped: prior test did not verify actual movement.'); continue
-            for direction in (-1,1):
+            if args.probe_j7:
+                print('J7 DIAGNOSTIC ONLY: +3deg; earlier 0.229deg was insufficient for general multi-pose approval.')
+                print('KP/KD, speed, tracking and effort alarms unchanged. Other joint TARGETS remain fixed.')
+            for direction in ((1,) if args.probe_j7 else (-1,1)):
                 best=None
                 for angle in angles:
                     target=baseline.copy(); target[i]+=direction*math.radians(angle)
@@ -129,6 +143,7 @@ def main():
               'frozen_model_sha256':tm.sha256(frozen),'model_xml_path':str(model_path),
               'model_xml_sha256':tm.sha256(model_path),'mujoco_version':mujoco.__version__,
               'source_snapshot':str(snapshot),'previous_run':str(args.previous_run),
+              'diagnostic_j7_start_probe':bool(args.probe_j7),
               'config_sha256':tm.sha256(out/'multi_config.json'),'poses_sha256':tm.sha256(out/'multi_poses.csv'),
               'zero_calibration_status':'unknown accuracy; no numerical uncertainty bound established',
               'limitations':'screened single-joint excursions only; physical limits/masses/zero not calibrated; collision exclusions remain active'}

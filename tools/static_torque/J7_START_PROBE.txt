@@ -1,0 +1,54 @@
+J7 单关节起动检查
+2026-10-15
+
+适用情况：上一轮 1°计划的完整 CSV 已分析；J7 实际正向变化约 0.229°且有力矩响应，
+但其他关节基本没动。用户确认支架/保护未限制运动。静摩擦、重力和控制死区仍未区分。
+
+本更新给现有 prepare_multi_pose.py 增加 --probe-j7 选项。
+通用多姿态的 0.25°条件保留。新选项仅准备“起点、J7 正向3°、回起点”的诊断计划，
+不自动扩大其他关节。J1～J6 的目标不变，但仍使能以保持姿态。
+
+选择 3°是对已观察到小幅响应的 J7 做下一步缓慢起动检查，不是确认所有关节适合大角度。
+保持原有 KP/KD、0.005 rad/s 速度、0.03 rad 跟踪报警、0.025 rad 稳定误差和报警值。
+J7 软件力矩报警仍为 0.7 Nm；位置误差保护可能在达到该力矩前就中止。
+例如 J7 Kp=6，0.03 rad 位置误差对应约 0.18 Nm 比例项；这不是实际总力矩上限。
+软件保护不是固件硬限流，需保留急停和防跌落保护。不能反复强行顶住不动的关节。
+
+文件更新：
+把新版 prepare_multi_pose.py 复制到 Ubuntu：
+/home/lsk/openarm_v1_ws/src/openarm-v1-project/tools/static_torque/
+覆盖同名文件。其他 Python/C++ 文件沿用已提供的多姿态更新版。
+仅更新此 Python 文件不需要重新编译 C++；此前多姿态 C++ 更新必须已经编译。
+
+Ubuntu 同一个终端按顺序执行：
+
+cd ~/openarm_v1_ws/src/openarm-v1-project/tools/static_torque
+
+确认上一轮程序已退出、机械臂承托并失能、其他控制/查询程序关闭、can0 已开启后：
+
+./build/openarm_static_torque --diagnose --interface can0
+
+诊断成功后保持姿态不变，立即执行：
+
+PROBE_DIR="$HOME/experiments/torque_compare/j7_probe_$(date +%Y%m%d_%H%M%S)"
+.venv/bin/python prepare_multi_pose.py \
+  --previous-run "$HOME/experiments/torque_compare/static_1792044758710916613" \
+  --snapshot latest --probe-j7 --out "$PROBE_DIR"
+
+这一步不访问 CAN。应只选出 J7 +3°，共3个采样姿态（起点、J7 +3°、回起点）。
+若模型/保持能力检查拒绝，不扩大阈值；保留输出排查。
+
+准备成功且运动空间确认后：
+
+./build/openarm_static_torque --interface can0 --plan "$PROBE_DIR/plan.json" --execute
+
+输入 RUN_STATIC 才运动。保持防护但不在正常采样时承重，观察 J7 是否真实转动。
+实际位移至少应达到目标变化的一半，即1.5°；否则多姿态 C++ 版会报位移不足并中止。
+若跟踪误差/力矩等保护先触发，也不要改大阈值或立即重复冲击。
+结束回起点并保持后，承托好，输入 SUPPORTED 退出。
+
+把控制台完整输出和本次 static_.../samples.csv 保留下来。
+若3°仍不能有效运动，下一步应核对反馈/输出轴映射、制动或机械传动、
+以及制造商控制参数和起动力矩，而不是直接继续扩大角度或提高增益。
+
+验证：原多姿态5项测试及新增J7诊断条件测试通过；本选项尚未实机验证。
