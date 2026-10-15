@@ -20,7 +20,7 @@ import sys
 import time
 
 HERE = Path(__file__).resolve().parent
-VERSION = 'openarm-static-v1-multi7-proximal'
+VERSION = 'openarm-static-v1-multi8-adaptive-proximal'
 
 
 def run(command):

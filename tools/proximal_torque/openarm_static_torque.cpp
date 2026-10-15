@@ -1131,15 +1131,23 @@ Settings load_settings(const Json& plan) {
             }
             if(!found) elbow_levels.push_back(q);
         }
-        if(shoulder_levels[0].size()!=5 || shoulder_levels[1].size()!=5 || elbow_levels.size()!=2)
+        const auto layout=cfg.value("proximal_layout",std::string{"grid_5x5x2"});
+        if(layout!="grid_5x5x2" && layout!="adaptive_coverage")
+            throw std::runtime_error("unknown proximal layout");
+        if(layout=="grid_5x5x2" &&
+           (shoulder_levels[0].size()!=5 || shoulder_levels[1].size()!=5 || elbow_levels.size()!=2))
             throw std::runtime_error("proximal plan must contain a complete 5x5x2 grid");
+        for(const auto& pose:plan.at("poses")) {
+            if(pose.contains("via_start") && (!pose.at("via_start").is_boolean() || layout!="adaptive_coverage"))
+                throw std::runtime_error("invalid planned baseline transit");
+        }
         const double required=cfg.at("minimum_proximal_actual_span_rad").get<double>()+2*s.capture_error;
         for(int i=0;i<2;++i) {
             const auto bounds=std::minmax_element(shoulder_levels[i].begin(),shoulder_levels[i].end());
             if(*bounds.second-*bounds.first<required-1e-9)
                 throw std::runtime_error("nominal shoulder coverage cannot guarantee requested capture-error margin");
         }
-        std::cout << "PROXIMAL GRID: 50 bases, paired approaches; J1/J2 actual coverage enforced.\n"
+        std::cout << "PROXIMAL COVERAGE: 50 bases, paired approaches; J1/J2 actual coverage enforced.\n"
                      "Gains and motion speed unchanged; review planned ranges and selected alarms.\n"
                   << "TORQUE PROFILE: " << torque_profile << "; software alarms Nm " << Json(TORQUE_ALARM).dump() << '\n';
     }
@@ -1372,7 +1380,7 @@ int main(int argc, char** argv) {
     for (int n=1; n<argc; ++n) {
         const std::string arg=argv[n];
         if (arg=="--version") {
-            std::cout << "openarm-static-v1-multi7-proximal\n"; return 0;
+            std::cout << "openarm-static-v1-multi8-adaptive-proximal\n"; return 0;
         } else if (arg=="--help") {
             std::cout << "openarm_static_torque [--diagnose] [--interface can0] [--output-root DIR]\n"
                          "openarm_static_torque --plan PLAN.json --execute [--interface can0]\n"; return 0;
@@ -1391,7 +1399,7 @@ int main(int argc, char** argv) {
     Json metadata{{"completed",false},{"mode", execute ? "static_motion" : "diagnose"},
                   {"interface",CAN_INTERFACE},{"period_s",PERIOD_S},
                   {"torque_source","motor reported estimate; not a calibrated external torque sensor"},
-                  {"software_version","openarm-static-v1-multi7-proximal"},
+                  {"software_version","openarm-static-v1-multi8-adaptive-proximal"},
                   {"sampling_schema","continuous-window-v1"}};
     try {
         if (output_root.empty()) {
@@ -1476,9 +1484,13 @@ int main(int argc, char** argv) {
             const Vec target=vector7(pose,"q_motor_rad");
             Vec pre_actual{};
             if(proximal) {
+                Settings staging=settings;staging.position_error=settings.capture_error;
+                if(pose.value("via_start",false)) {
+                    move_static(arm,current,expected,settings,log,cycle,name+"_via_start");
+                    hold_static(arm,current,expected,staging,log,cycle,name+"_via_start",false);
+                }
                 const Vec pre=vector7(pose,"pre_q_motor_rad");
                 move_static(arm,current,pre,settings,log,cycle,name+"_approach");
-                Settings staging=settings;staging.position_error=settings.capture_error;
                 hold_static(arm,current,pre,staging,log,cycle,name+"_approach",false);
                 pre_actual=current.q;
             }

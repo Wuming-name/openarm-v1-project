@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline 5x5x2 shoulder-grid planning with paired, explicit approach paths."""
+"""Offline adaptive shoulder coverage with paired, explicitly checked paths."""
 import argparse
 from collections import Counter
 import csv
@@ -156,6 +156,117 @@ def select_grid(model,cfg,q,max_span,progress=False):
     raise error
 
 
+def select_adaptive(model,cfg,q,max_span,progress=False):
+    """Choose 50 separate feasible configurations, rather than a Cartesian grid.
+
+    Endpoint feasibility is not path feasibility. Every selected candidate must
+    connect to the baseline in both directions and admit both approach paths.
+    Baseline routing is a planned normal transit, never a fault recovery.
+    """
+    cfg['proximal_layout']='adaptive_coverage'
+    tm.validate_config(cfg)
+    checked=CheckedModel(model,cfg)
+    checked.point(q)
+    margin=cfg['path_margin_rad']+cfg['startup_tolerance_rad']
+    bounds=[]
+    for i in (0,1):
+        extra=cfg['approach_offset_rad'][i]
+        low=max(cfg['q_min_rad'][i]+margin+extra,q[i]-cfg['max_excursion_per_joint_rad'][i])
+        high=min(cfg['q_max_rad'][i]-margin-extra,q[i]+cfg['max_excursion_per_joint_rad'][i])
+        width=min(math.radians(max_span),high-low)
+        if width<=0: raise ValueError(f'J{i+1}: no shoulder range with approach clearance')
+        center=min(max(q[i],low+width/2),high-width/2)
+        bounds.append((center-width/2,center+width/2))
+    modes=[]
+    for d3,d4 in itertools.product((-20,0,20),range(-80,81,20)):
+        mode=list(q);mode[2]+=math.radians(d3);mode[3]+=math.radians(d4)
+        if all(cfg['q_min_rad'][i]+margin+cfg['approach_offset_rad'][i]<=mode[i]<=
+               cfg['q_max_rad'][i]-margin-cfg['approach_offset_rad'][i] and
+               abs(mode[i]-q[i])<=cfg['max_excursion_per_joint_rad'][i]+1e-9 for i in (2,3)):
+            modes.append(mode)
+    pool=[];attempts=0
+    for a in linspace(*bounds[0],11):
+        for b,mode in itertools.product(linspace(*bounds[1],11),modes):
+            attempts+=1;target=list(mode);target[0]=a;target[1]=b
+            pre=[[x-sign*d for x,d in zip(target,cfg['approach_offset_rad'])] for sign in (1,-1)]
+            try:
+                checked.point(target)
+                for point in pre:checked.point(point)
+            except ValueError:continue
+            pool.append({'q_motor_rad':target,'pre':pre})
+        if progress: print(f'Adaptive endpoint screening {attempts}; feasible endpoints {len(pool)}.',flush=True)
+    endpoint_pool=list(pool)
+    selected=[];selected_g=[];path_trials=0
+    required=cfg['minimum_proximal_actual_span_rad']+2*cfg['static_capture_error_rad']
+    spacing=max(math.radians(5),cfg['minimum_distinct_pose_rad']+2*cfg['static_capture_error_rad'])
+    def span(rows,i):
+        values=[r['q_motor_rad'][i] for r in rows]
+        return max(values)-min(values) if values else 0
+    while pool and len(selected)<50:
+        def score(row):
+            rows=selected+[row];s0=span(rows,0);s1=span(rows,1)
+            novelty=min((old.distance(row['q_motor_rad'],x['q_motor_rad']) for x in selected),default=0)
+            if not selected:return (0,0,-old.distance(q,row['q_motor_rad']))
+            return (min(s0,s1),s0+s1,novelty)
+        pool.sort(key=score,reverse=True)
+        accepted=False
+        while pool:
+            row=pool.pop(0);target=row['q_motor_rad']
+            if any(old.distance(target,x['q_motor_rad'])<spacing-1e-9 for x in selected):continue
+            path_trials+=1
+            try:
+                for pre in row['pre']:
+                    checked.path(q,pre);checked.path(pre,target)
+                    checked.path(target,pre)
+                checked.path(target,q)
+            except ValueError:continue
+            selected.append(row);selected_g.append(checked.point(target));accepted=True
+            if progress: print(f'Adaptive path-checked bases {len(selected)}/50; J1/J2 spans '
+                               f'{math.degrees(span(selected,0)):.1f}/{math.degrees(span(selected,1)):.1f} deg.',flush=True)
+            break
+        if not accepted:break
+    assessment={'layout':'adaptive_coverage','candidate_endpoints_tried':attempts,
+                'feasible_endpoint_count':len(endpoint_pool),'candidate_paths_tried':path_trials,
+                'selected_base_count':len(selected),'rejections':dict(checked.rejections),
+                'endpoint_only_shoulder_spans_deg':[math.degrees(span(endpoint_pool,i)) for i in (0,1)],
+                'selected_path_checked_shoulder_spans_deg':[math.degrees(span(selected,i)) for i in (0,1)],
+                'minimum_required_nominal_span_deg':math.degrees(required),
+                'minimum_nominal_base_spacing_deg':math.degrees(spacing),
+                'minimum_actual_span_deg':math.degrees(cfg['minimum_proximal_actual_span_rad']),
+                'max_searched_span_deg':max_span,'config':cfg,'executable_plan_created':False}
+    if len(selected)!=50 or any(span(selected,i)<required-1e-9 for i in (0,1)):
+        error=ValueError(f'Adaptive search did not find 50 path-connected bases with required shoulder coverage; '
+                         f'selected={len(selected)}, spans_deg={assessment["selected_path_checked_shoulder_spans_deg"]}, '
+                         f'required_nominal_deg={math.degrees(required):.3f}; '
+                         f'primary model rejections={checked.rejections.most_common(8)}. No executable plan created.')
+        error.assessment=assessment;raise error
+    # Order chosen configurations by nearest transit; recheck every actual leg.
+    bases=[];current=list(q);remaining=list(selected)
+    while remaining:
+        row=min(remaining,key=lambda x:old.distance(current,x['q_motor_rad']))
+        remaining.remove(row)
+        bases.append({'base_pose_id':f'base_{len(bases)+1:03d}','q_motor_rad':row['q_motor_rad']})
+        current=row['q_motor_rad']
+    samples=acquisitions(bases,cfg);current=list(q);via_count=0
+    for row in samples:
+        pre=row['pre_q_motor_rad'];target=row['q_motor_rad']
+        try:checked.path(current,pre)
+        except ValueError:
+            checked.path(current,q);checked.path(q,pre)
+            row['via_start']=True;via_count+=1
+        checked.path(pre,target);current=target
+    checked.path(current,q)
+    coverage=dict(assessment,executable_plan_created=True,
+                  nominal_j1_span_deg=math.degrees(span(selected,0)),
+                  nominal_j2_span_deg=math.degrees(span(selected,1)),
+                  minimum_required_actual_span_deg=math.degrees(cfg['minimum_proximal_actual_span_rad']),
+                  nominal_ranges_deg=[[math.degrees(min(b['q_motor_rad'][i] for b in bases)),
+                                       math.degrees(max(b['q_motor_rad'][i] for b in bases))] for i in range(7)],
+                  model_gravity_ranges_nm=[[min(g[i] for g in selected_g),max(g[i] for g in selected_g)] for i in range(7)],
+                  planned_baseline_transits=via_count,cached_path_points=len(checked.cache))
+    return bases,samples,coverage
+
+
 def save_plan(model,cfg,model_path,snapshot,q,bases,samples,coverage,out,mujoco):
     out.mkdir(parents=True,exist_ok=False)
     frozen=out/'model.mjb';mujoco.mj_saveModel(model.model,str(frozen),None)
@@ -176,11 +287,12 @@ def save_plan(model,cfg,model_path,snapshot,q,bases,samples,coverage,out,mujoco)
           'limitations':'Nominal model screening only; actual zero/mass/geometry and motor-output torque scale unverified.'}
     duration=0;current=list(q)
     for row in samples:
-        for target in [row['pre_q_motor_rad'],row['q_motor_rad']]:
+        waypoints=([q] if row.get('via_start') else [])+[row['pre_q_motor_rad'],row['q_motor_rad']]
+        for target in waypoints:
             d=old.distance(current,target)
             duration+=max(.05,1.875*d/cfg['transit_speed_rad_s'],math.sqrt(5.774*d/cfg['transit_accel_rad_s2']))
             current=target
-        duration+=2*cfg['stable_seconds']+cfg['sample_seconds']
+        duration+=(2+int(bool(row.get('via_start'))))*cfg['stable_seconds']+cfg['sample_seconds']
     d=old.distance(current,q)
     duration+=max(.05,1.875*d/cfg['transit_speed_rad_s'],math.sqrt(5.774*d/cfg['transit_accel_rad_s2']))
     coverage['approximate_duration_minutes']=duration/60
@@ -211,7 +323,7 @@ def main():
                         [float(raw.jnt_range[j,0]) for j in ids],[float(raw.jnt_range[j,1]) for j in ids],
                         args.min_proximal_span_deg,args.approach_deg,args.repeats,args.torque_profile)
         print('Explicit torque profile:',cfg['torque_profile'],'software alarms Nm:',cfg['torque_alarm_nm'],flush=True)
-        bases,samples,coverage=select_grid(tm.Model(cfg,path),cfg,q,args.max_proximal_span_deg,progress=True)
+        bases,samples,coverage=select_adaptive(tm.Model(cfg,path),cfg,q,args.max_proximal_span_deg,progress=True)
         duration=save_plan(tm.Model(cfg,path),cfg,path,snap,q,bases,samples,coverage,args.out.expanduser().resolve(),mujoco)
         print('J1/J2 nominal spans:',coverage['nominal_j1_span_deg'],coverage['nominal_j2_span_deg'],'deg',flush=True)
         print(f'50 bases; {len(samples)} directional acquisitions. Approximate {duration:.1f} minutes + extra settling/end hold.',flush=True)

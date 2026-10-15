@@ -140,6 +140,8 @@ def validate_config(cfg):
                 or cfg['path_margin_rad']<.04 or cfg['transit_accel_rad_s2']>.08):
             raise ValueError('Settings exceed legacy static-collection profile')
         if proximal:
+            if cfg.get('proximal_layout','grid_5x5x2') not in ('grid_5x5x2','adaptive_coverage'):
+                raise ValueError('Unknown proximal layout')
             maxima=vector7(cfg,'max_excursion_per_joint_rad')
             caps=list(map(math.radians,[60,75,30,90,0,0,0]))
             if any(x<0 or x>cap+1e-9 for x,cap in zip(maxima,caps)):
