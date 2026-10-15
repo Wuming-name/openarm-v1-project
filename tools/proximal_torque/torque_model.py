@@ -142,6 +142,8 @@ def validate_config(cfg):
         if proximal:
             if cfg.get('proximal_layout','grid_5x5x2') not in ('grid_5x5x2','adaptive_coverage'):
                 raise ValueError('Unknown proximal layout')
+            if cfg.get('approach_direction_policy','same_sign') not in ('same_sign','per_base_opposed_vectors'):
+                raise ValueError('Unknown approach direction policy')
             maxima=vector7(cfg,'max_excursion_per_joint_rad')
             caps=list(map(math.radians,[60,75,30,90,0,0,0]))
             if any(x<0 or x>cap+1e-9 for x,cap in zip(maxima,caps)):
@@ -291,14 +293,20 @@ def proximal_data_checks(summary,plan,meta):
     cfg=plan['config']; poses=plan['poses']
     index={(s['pose_id'],s['joint']):s['q_mean_rad'] for s in summary}
     checks={c['pose_id']:c for c in meta.get('pose_checks',[]) if c.get('passed')}
-    first={};counts={};all_good=True
+    first={};counts={};patterns={};all_good=True
     for p in poses:
         name=p['pose_id'];base=p['base_pose_id']
+        if cfg.get('approach_direction_policy')=='per_base_opposed_vectors' and 'approach_axis_sign' not in p:
+            return False,[]
         if name not in checks or any((name,f'J{i}') not in index for i in range(1,8)):
             return False,[]
         q=[index[(name,f'J{i}')] for i in range(1,8)]
         pre=checks[name].get('pre_actual_q_rad',[])
-        if len(pre)!=7 or any(p['approach_command_sign']*(q[i]-pre[i])<cfg['minimum_actual_approach_rad'] for i in range(7)):
+        pattern=p.get('approach_axis_sign',[1]*7)
+        if len(pattern)!=7 or any(type(x) not in (int,float) or x not in (-1,1) for x in pattern):return False,[]
+        if base in patterns and pattern!=patterns[base]:return False,[]
+        patterns[base]=pattern
+        if len(pre)!=7 or any(p['approach_command_sign']*pattern[i]*(q[i]-pre[i])<cfg['minimum_actual_approach_rad'] for i in range(7)):
             all_good=False
         first.setdefault(base,(name,q))
         key=(base,p['repetition'],p['approach_command_sign'])

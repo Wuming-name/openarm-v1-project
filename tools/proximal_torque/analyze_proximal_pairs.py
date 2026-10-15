@@ -10,9 +10,16 @@ import torque_model as tm
 
 def pair_rows(plan,summary,angle_tolerance_deg=.5):
     indexed={(row['pose_id'],row['joint']):row for row in summary}
-    groups={}
+    groups={};patterns={}
     for pose in plan['poses']:
         key=(pose['base_pose_id'],pose['repetition'])
+        if plan.get('config',{}).get('approach_direction_policy')=='per_base_opposed_vectors' and 'approach_axis_sign' not in pose:
+            raise ValueError('Missing per-axis approach directions')
+        pattern=pose.get('approach_axis_sign',[1]*7)
+        if len(pattern)!=7 or any(type(x) not in (int,float) or x not in (-1,1) for x in pattern):
+            raise ValueError('Invalid per-axis approach directions')
+        if key in patterns and patterns[key]!=pattern:raise ValueError('Paired per-axis directions differ')
+        patterns[key]=pattern
         if pose['approach_command_sign'] in groups.setdefault(key,{}):
             raise ValueError('Duplicate acquisition direction')
         groups[key][pose['approach_command_sign']]=pose['pose_id']
@@ -23,11 +30,14 @@ def pair_rows(plan,summary,angle_tolerance_deg=.5):
         dec=[indexed[(group[-1],f'J{i}')] for i in range(1,8)]
         mismatch=math.degrees(max(abs(float(a['q_mean_rad'])-float(b['q_mean_rad'])) for a,b in zip(inc,dec)))
         for i,(a,b) in enumerate(zip(inc,dec),1):
+            pos_id,neg_id=group[1],group[-1]
+            if patterns[(base,repeat)][i-1]==-1:
+                a,b=b,a;pos_id,neg_id=neg_id,pos_id
             ta=float(a['feedback_mean_nm']);tb=float(b['feedback_mean_nm'])
             ga=float(a['gravity_mean_nm']);gb=float(b['gravity_mean_nm'])
             ra=ta-ga;rb=tb-gb
             rows.append({'base_pose_id':base,'repetition':repeat,'joint':f'J{i}',
-                         'inc_pose_id':group[1],'dec_pose_id':group[-1],
+                         'inc_pose_id':pos_id,'dec_pose_id':neg_id,
                          'q_inc_deg':math.degrees(float(a['q_mean_rad'])),'q_dec_deg':math.degrees(float(b['q_mean_rad'])),
                          'max_seven_joint_pair_mismatch_deg':mismatch,'angles_matched':mismatch<=angle_tolerance_deg,
                          'torque_inc_nm':ta,'torque_dec_nm':tb,'model_inc_nm':ga,'model_dec_nm':gb,

@@ -87,11 +87,12 @@ def acquisitions(bases,cfg):
     rows=[]
     for base in bases:
         q=base['q_motor_rad']
+        pattern=base.get('approach_axis_sign',[1]*7)
         for repeat in range(1,cfg['repetitions']+1):
             for sign,label in ((1,'inc'),(-1,'dec')):
                 rows.append(dict(base,pose_id=f"{base['base_pose_id']}_{label}_r{repeat}",
                                  repetition=repeat,approach_command_sign=sign,
-                                 pre_q_motor_rad=[x-sign*d for x,d in zip(q,cfg['approach_offset_rad'])]))
+                                 pre_q_motor_rad=[x-sign*s*d for x,s,d in zip(q,pattern,cfg['approach_offset_rad'])]))
     return rows
 
 
@@ -164,6 +165,7 @@ def select_adaptive(model,cfg,q,max_span,progress=False):
     Baseline routing is a planned normal transit, never a fault recovery.
     """
     cfg['proximal_layout']='adaptive_coverage'
+    cfg['approach_direction_policy']='per_base_opposed_vectors'
     tm.validate_config(cfg)
     checked=CheckedModel(model,cfg)
     checked.point(q)
@@ -171,61 +173,96 @@ def select_adaptive(model,cfg,q,max_span,progress=False):
     bounds=[]
     for i in (0,1):
         extra=cfg['approach_offset_rad'][i]
-        low=max(cfg['q_min_rad'][i]+margin+extra,q[i]-cfg['max_excursion_per_joint_rad'][i])
-        high=min(cfg['q_max_rad'][i]-margin-extra,q[i]+cfg['max_excursion_per_joint_rad'][i])
+        low=max(cfg['q_min_rad'][i]+margin+extra+1e-8,q[i]-cfg['max_excursion_per_joint_rad'][i])
+        high=min(cfg['q_max_rad'][i]-margin-extra-1e-8,q[i]+cfg['max_excursion_per_joint_rad'][i])
         width=min(math.radians(max_span),high-low)
         if width<=0: raise ValueError(f'J{i+1}: no shoulder range with approach clearance')
         center=min(max(q[i],low+width/2),high-width/2)
         bounds.append((center-width/2,center+width/2))
     modes=[]
-    for d3,d4 in itertools.product((-20,0,20),range(-80,81,20)):
+    for d3,d4 in itertools.product(range(-30,31,10),range(-80,81,5)):
         mode=list(q);mode[2]+=math.radians(d3);mode[3]+=math.radians(d4)
         if all(cfg['q_min_rad'][i]+margin+cfg['approach_offset_rad'][i]<=mode[i]<=
                cfg['q_max_rad'][i]-margin-cfg['approach_offset_rad'][i] and
                abs(mode[i]-q[i])<=cfg['max_excursion_per_joint_rad'][i]+1e-9 for i in (2,3)):
             modes.append(mode)
-    pool=[];attempts=0
-    for a in linspace(*bounds[0],11):
-        for b,mode in itertools.product(linspace(*bounds[1],11),modes):
+    patterns=sorted([(1,)+tail for tail in itertools.product((-1,1),repeat=6)],key=lambda s:s.count(-1))
+    pool=[];attempts=0;target_count=0;all_same_sign_count=0;stage_rejections=Counter()
+    limits=[cfg['gravity_alarm_fraction']*x for x in cfg['torque_alarm_nm']]
+    def endpoint_options(target,exclude=None):
+        for pattern in patterns:
+            if pattern==exclude:continue
+            pre=[[x-sign*s*d for x,s,d in zip(target,pattern,cfg['approach_offset_rad'])] for sign in (1,-1)]
+            try:gs=[checked.point(point) for point in pre]
+            except ValueError as exc:
+                stage_rejections['approach endpoint: '+str(exc)]+=1;continue
+            utilization=max(abs(g[i])/limits[i] for g in gs for i in range(7))
+            yield {'pattern':pattern,'pre':pre,'utilization':utilization}
+    for a in linspace(*bounds[0],17):
+        for b,mode in itertools.product(linspace(*bounds[1],17),modes):
             attempts+=1;target=list(mode);target[0]=a;target[1]=b
-            pre=[[x-sign*d for x,d in zip(target,cfg['approach_offset_rad'])] for sign in (1,-1)]
             try:
                 checked.point(target)
-                for point in pre:checked.point(point)
-            except ValueError:continue
-            pool.append({'q_motor_rad':target,'pre':pre})
-        if progress: print(f'Adaptive endpoint screening {attempts}; feasible endpoints {len(pool)}.',flush=True)
+            except ValueError as exc:
+                stage_rejections['target: '+str(exc)]+=1;continue
+            target_count+=1
+            option=next(endpoint_options(target),None)
+            if option:
+                if option['pattern']==(1,)*7:all_same_sign_count+=1
+                pool.append({'q_motor_rad':target,'first_option':option})
+        if progress: print(f'Adaptive endpoint screening {attempts}; target-only passed {target_count}; '
+                           f'opposed-vector endpoints passed {len(pool)}.',flush=True)
     endpoint_pool=list(pool)
     selected=[];selected_g=[];path_trials=0
     required=cfg['minimum_proximal_actual_span_rad']+2*cfg['static_capture_error_rad']
-    spacing=max(math.radians(5),cfg['minimum_distinct_pose_rad']+2*cfg['static_capture_error_rad'])
+    # Restore the controller's existing 5deg target separation. Capture error
+    # is not a measured inter-pose displacement; C++ still requires distinct
+    # ACTUAL configurations >=1deg and actual shoulder coverage after sampling.
+    spacing=math.radians(5)
     def span(rows,i):
         values=[r['q_motor_rad'][i] for r in rows]
         return max(values)-min(values) if values else 0
     while pool and len(selected)<50:
+        lows=[min((r['q_motor_rad'][i] for r in selected),default=0) for i in (0,1)]
+        highs=[max((r['q_motor_rad'][i] for r in selected),default=0) for i in (0,1)]
         def score(row):
-            rows=selected+[row];s0=span(rows,0);s1=span(rows,1)
-            novelty=min((old.distance(row['q_motor_rad'],x['q_motor_rad']) for x in selected),default=0)
             if not selected:return (0,0,-old.distance(q,row['q_motor_rad']))
-            return (min(s0,s1),s0+s1,novelty)
+            v=row['q_motor_rad']
+            spans=[max(highs[i],v[i])-min(lows[i],v[i]) for i in (0,1)]
+            return (min(spans[0],required)+min(spans[1],required),row['nearest'],sum(spans))
         pool.sort(key=score,reverse=True)
         accepted=False
         while pool:
             row=pool.pop(0);target=row['q_motor_rad']
-            if any(old.distance(target,x['q_motor_rad'])<spacing-1e-9 for x in selected):continue
             path_trials+=1
-            try:
-                for pre in row['pre']:
-                    checked.path(q,pre);checked.path(pre,target)
-                    checked.path(target,pre)
-                checked.path(target,q)
-            except ValueError:continue
+            try:checked.path(target,q)
+            except ValueError as exc:
+                stage_rejections['candidate return path: '+str(exc)]+=1;continue
+            chosen=None
+            options=itertools.chain([row['first_option']],endpoint_options(target,row['first_option']['pattern']))
+            for option in options:
+                try:
+                    for pre in option['pre']:
+                        checked.path(q,pre);checked.path(pre,target)
+                        checked.path(target,pre)
+                except ValueError as exc:
+                    stage_rejections['candidate path: '+str(exc)]+=1;continue
+                chosen=option;break
+            if chosen is None:continue
+            row['approach_axis_sign']=list(chosen['pattern'])
             selected.append(row);selected_g.append(checked.point(target));accepted=True
+            retained=[]
+            for candidate in pool:
+                candidate['nearest']=min(candidate.get('nearest',math.inf),old.distance(target,candidate['q_motor_rad']))
+                if candidate['nearest']>=spacing-1e-9:retained.append(candidate)
+            pool=retained
             if progress: print(f'Adaptive path-checked bases {len(selected)}/50; J1/J2 spans '
                                f'{math.degrees(span(selected,0)):.1f}/{math.degrees(span(selected,1)):.1f} deg.',flush=True)
             break
         if not accepted:break
     assessment={'layout':'adaptive_coverage','candidate_endpoints_tried':attempts,
+                'target_only_pass_count':target_count,'all_same_sign_endpoint_pass_count':all_same_sign_count,
+                'stage_rejections':dict(stage_rejections),
                 'feasible_endpoint_count':len(endpoint_pool),'candidate_paths_tried':path_trials,
                 'selected_base_count':len(selected),'rejections':dict(checked.rejections),
                 'endpoint_only_shoulder_spans_deg':[math.degrees(span(endpoint_pool,i)) for i in (0,1)],
@@ -245,7 +282,8 @@ def select_adaptive(model,cfg,q,max_span,progress=False):
     while remaining:
         row=min(remaining,key=lambda x:old.distance(current,x['q_motor_rad']))
         remaining.remove(row)
-        bases.append({'base_pose_id':f'base_{len(bases)+1:03d}','q_motor_rad':row['q_motor_rad']})
+        bases.append({'base_pose_id':f'base_{len(bases)+1:03d}','q_motor_rad':row['q_motor_rad'],
+                      'approach_axis_sign':row['approach_axis_sign']})
         current=row['q_motor_rad']
     samples=acquisitions(bases,cfg);current=list(q);via_count=0
     for row in samples:
@@ -263,7 +301,8 @@ def select_adaptive(model,cfg,q,max_span,progress=False):
                   nominal_ranges_deg=[[math.degrees(min(b['q_motor_rad'][i] for b in bases)),
                                        math.degrees(max(b['q_motor_rad'][i] for b in bases))] for i in range(7)],
                   model_gravity_ranges_nm=[[min(g[i] for g in selected_g),max(g[i] for g in selected_g)] for i in range(7)],
-                  planned_baseline_transits=via_count,cached_path_points=len(checked.cache))
+                  planned_baseline_transits=via_count,cached_path_points=len(checked.cache),
+                  rejections=dict(checked.rejections))
     return bases,samples,coverage
 
 
@@ -274,10 +313,14 @@ def save_plan(model,cfg,model_path,snapshot,q,bases,samples,coverage,out,mujoco)
     for filename,rows in [('base_poses_50.csv',bases),('acquisitions.csv',samples)]:
         with (out/filename).open('x',encoding='utf-8',newline='') as stream:
             writer=csv.writer(stream)
-            writer.writerow(['base_pose_id','pose_id','approach_sign','repetition']+[f'q{i}_deg' for i in range(1,8)])
+            writer.writerow(['base_pose_id','pose_id','approach_sign','repetition']+[f'q{i}_deg' for i in range(1,8)]+
+                            [f'approach_axis_sign{i}' for i in range(1,8)]+['via_start']+
+                            [f'pre_q{i}_deg' for i in range(1,8)])
             for row in rows:
                 writer.writerow([row['base_pose_id'],row.get('pose_id',''),row.get('approach_command_sign',''),
-                                 row.get('repetition','')]+[math.degrees(x) for x in row['q_motor_rad']])
+                                 row.get('repetition','')]+[math.degrees(x) for x in row['q_motor_rad']]+
+                                row.get('approach_axis_sign',[1]*7)+[row.get('via_start',False)]+
+                                ([math.degrees(x) for x in row['pre_q_motor_rad']] if 'pre_q_motor_rad' in row else ['']*7))
     plan={'schema':'openarm-static-v1','model_path_checked':True,'config':cfg,
           'baseline_q_motor_rad':q,'poses':samples,'base_poses':bases,'coverage':coverage,
           'frozen_model_file':'model.mjb','frozen_model_sha256':tm.sha256(frozen),

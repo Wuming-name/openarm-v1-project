@@ -1,10 +1,15 @@
 OpenArm V1 右臂：自适应近端覆盖与双向力矩采集
-版本 openarm-static-v1-multi8-adaptive-proximal
+版本 openarm-static-v1-multi9-opposed-vectors
 
 本次修正
 旧规划器要求完整5×5×2网格，任一角点或路径不通过，就拒绝整个网格。
 新版不再要求所有肩部位置共用两种肘部姿态。
-在每个肩部轴11级候选和多个J3/J4组合中搜索，覆盖优先选50个基础配置。
+在每个肩部轴17级候选和更密集的J3/J4组合中搜索，覆盖优先选50个基础配置。
+修正七轴必须同号接近的额外限制：每个基础姿态可选择不同轴的正负组合，第二次全部反向。
+例如A方向为[+,-,+,-,+,+,-]，B方向就是[-,+,-,+,-,-,+]。
+每一轴仍有一正一反两次接近，偏移幅度仍12度，阈值与路径检查不变。
+最多搜索64组互为反向的方向组合，不代表任意真实路径均可行。
+方向组合先通过两侧端点筛选，再通过接近及中转路径检查；不能只凭端点通过执行。
 这是离散候选搜索，不是全空间最优规划；搜索失败不证明不存在其他可行姿态。
 没有提高任何力矩阈值、增益、速度、加速度，也没有关闭接触/限位检查。
 
@@ -14,7 +19,8 @@ OpenArm V1 右臂：自适应近端覆盖与双向力矩采集
 J1和J2实际跨度都至少30度；目标跨度另加两端捕获误差余量约9.17度。
 正式目标J5-J7仍保持起点角度，预接近过程会正反移动这些轴。
 默认七轴接近偏移12度，并逐轴核验实测接近方向和幅度至少1度。
-基础目标间距至少为1度实测区别要求加两端捕获余量，约10.17度。
+基础目标间距恢复为控制器原有的5度；运行时实测配置仍须至少相差1度。
+5度目标间距不保证实测区别；若实测姿态重合，运行时拒绝计数并停止。
 所有目标、接近路径、转移路径和正常返回起点路径都进行名义模型检查。
 路径以最大轴间隔0.015rad离散检查，不是连续碰撞或真实机械净空证明。
 零点精度、模型质量和几何、输出轴力矩标度仍未核准。
@@ -40,11 +46,11 @@ proximal_5_3：显式选择[5,5,3,3,.7,.7,.7]Nm。
 不改MIT模式、内部电流参数或零位；故障只尝试失能，未确认实际失能。
 
 安装更新
-将openarm_proximal_adaptive.zip复制到Ubuntu的/home/lsk目录。
+将openarm_proximal_vectors.zip复制到Ubuntu的/home/lsk目录。
 在Ubuntu终端执行：
 cd ~/openarm_v1_ws/src/openarm-v1-project/tools/proximal_torque
 tar --exclude='./.venv' --exclude='./build' -czf "$HOME/proximal_torque_before_adaptive_$(date +%Y%m%d_%H%M%S).tar.gz" .
-python3 -m zipfile -e "$HOME/openarm_proximal_adaptive.zip" .
+python3 -m zipfile -e "$HOME/openarm_proximal_vectors.zip" .
 保留现有.venv、build和模型，不需要重新安装依赖。启动时自动重新编译。
 完整新目录首次安装才需：python3 -m venv .venv，再用.venv/bin/python -m pip install -r requirements.txt。
 
@@ -55,6 +61,8 @@ python3 -m zipfile -e "$HOME/openarm_proximal_adaptive.zip" .
 90度是候选最大总跨度，不是正负90度，也不保证选出90度覆盖。
 检查prepared/base_poses_50.csv和coverage.json中的绝对角度、预计耗时和模型力矩。
 若失败，prepared/planning_rejection.json记录端点可行范围、已选路径可行范围和拒绝原因。
+新版单独记录target_only_pass_count、all_same_sign_endpoint_pass_count、feasible_endpoint_count。
+stage_rejections将目标、接近端点、接近路径及返回路径的拒绝分开。
 endpoint_only_shoulder_spans_deg仅是端点范围，不能当成路径可行范围。
 不会因失败而自动缩小最低跨度、提高报警或关闭接触检查。
 
@@ -74,14 +82,19 @@ analyze_proximal_pairs.py：相同基础目标的方向配对与共同/方向相
 其余prepare_*是公共依赖，不需逐个运行。
 结果目录：~/experiments/torque_compare/session_日期_时间_唯一编号/
 prepared/plan.json保存本次完整路线，prepared/coverage.json保存候选和规划范围。
+base_poses_50.csv和acquisitions.csv新增每轴方向，后者还包含预接近角度和经起点中转标记。
+pose_id中的inc/dec表示A/B方向组合；对单个关节不一定对应角度正向/负向。
+paired_directions.csv按每个关节的方向重新排列，inc_pose_id才是该关节正向接近的数据。
 static_*/samples.csv保存原始数据，metadata.json保存接受窗口、实际跨度和故障信息。
 static_*/comparison/包含poses_actual.csv、summary.csv、report.json及paired_directions.csv。
 若两方向实测七轴角度差超过0.5度，angles_matched=false，不把均值当同姿态重力。
 残差分解只是诊断，不是已经辨识出的摩擦系数或标定力矩。
 
 验证范围
-新增6项自适应规划离线测试，覆盖肩肘耦合、跨度不足、路径接触、中转和路线检查。
-14项近端/配对测试、13项编排测试、17项采样隔离/模型比较测试通过，共50项。
-模型测试使用模拟替身，没有用你的真实MuJoCo模型证明可行。
+新增7项自适应规划离线测试，覆盖肩肘耦合、混合方向、跨度不足、路径接触、中转和路线检查。
+17项近端/配对测试、13项编排测试、17项采样隔离/模型比较测试通过，共54项。
+另用本地XML质量与运动学做独立重力计算，在给出的近似起点复现旧同号端点筛选失败。
+独立计算不包含接触检查，也不等于在Ubuntu的真实MuJoCo中验证了完整计划。
+单元测试模型使用模拟替身。
 本地未编译Linux C++或实机执行；Ubuntu启动时编译并检查二进制版本。
 新姿态和经起点路径尚未经实机验证。不能保证当前模型和阈值一定允许所需覆盖。

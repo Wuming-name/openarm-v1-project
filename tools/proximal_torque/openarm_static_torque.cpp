@@ -1084,16 +1084,23 @@ Settings load_settings(const Json& plan) {
                 throw std::runtime_error("proximal profile exceeds declared gain/range/alarm bounds");
         }
         Json bases=Json::object(),names=Json::object(),directions=Json::object();
+        const auto direction_policy=cfg.value("approach_direction_policy",std::string{"same_sign"});
+        if(direction_policy!="same_sign" && direction_policy!="per_base_opposed_vectors")
+            throw std::runtime_error("unknown approach direction policy");
         for(const auto& pose:plan.at("poses")) {
             const Vec q=vector7(pose,"q_motor_rad"),pre=vector7(pose,"pre_q_motor_rad");
+            const Vec axis_sign=pose.contains("approach_axis_sign") ? vector7(pose,"approach_axis_sign") : Vec{1,1,1,1,1,1,1};
+            if(direction_policy=="per_base_opposed_vectors" && !pose.contains("approach_axis_sign"))
+                throw std::runtime_error("missing per-axis approach directions");
             const std::string base=pose.at("base_pose_id").get<std::string>(),name=pose.at("pose_id").get<std::string>();
             const int sign=pose.at("approach_command_sign").get<int>(),rep=pose.at("repetition").get<int>();
             if(base.empty() || names.contains(name) || (sign!=1 && sign!=-1) || rep<1 || rep>repeats)
                 throw std::runtime_error("invalid/duplicate paired acquisition identity");
             names[name]=true;
             for(int i=0;i<N;++i) {
-                if(std::abs(q[i]-origin[i])>extent[i]+1e-9 ||
-                   std::abs(pre[i]-(q[i]-sign*offset[i]))>1e-9 ||
+                if((axis_sign[i]!=1 && axis_sign[i]!=-1) || (direction_policy=="same_sign" && axis_sign[i]!=1) ||
+                   std::abs(q[i]-origin[i])>extent[i]+1e-9 ||
+                   std::abs(pre[i]-(q[i]-sign*axis_sign[i]*offset[i]))>1e-9 ||
                    q[i]<QMIN[i] || q[i]>QMAX[i] || pre[i]<QMIN[i] || pre[i]>QMAX[i])
                     throw std::runtime_error("proximal target/staging point exceeds declared path scope");
             }
@@ -1101,7 +1108,9 @@ Settings load_settings(const Json& plan) {
                 const Vec prior=vector7(bases[base],"q_motor_rad");
                 for(int i=0;i<N;++i) if(std::abs(q[i]-prior[i])>1e-9)
                     throw std::runtime_error("paired targets differ for one base pose");
-            } else bases[base]={{"q_motor_rad",q}};
+                if(axis_sign!=vector7(bases[base],"approach_axis_sign"))
+                    throw std::runtime_error("paired per-axis approach directions differ");
+            } else bases[base]={{"q_motor_rad",q},{"approach_axis_sign",axis_sign}};
             const std::string key=base+"_r"+std::to_string(rep);
             const int flag=sign==1 ? 1 : 2;
             const int mask=directions.value(key,0);
@@ -1380,7 +1389,7 @@ int main(int argc, char** argv) {
     for (int n=1; n<argc; ++n) {
         const std::string arg=argv[n];
         if (arg=="--version") {
-            std::cout << "openarm-static-v1-multi8-adaptive-proximal\n"; return 0;
+            std::cout << "openarm-static-v1-multi9-opposed-vectors\n"; return 0;
         } else if (arg=="--help") {
             std::cout << "openarm_static_torque [--diagnose] [--interface can0] [--output-root DIR]\n"
                          "openarm_static_torque --plan PLAN.json --execute [--interface can0]\n"; return 0;
@@ -1399,7 +1408,7 @@ int main(int argc, char** argv) {
     Json metadata{{"completed",false},{"mode", execute ? "static_motion" : "diagnose"},
                   {"interface",CAN_INTERFACE},{"period_s",PERIOD_S},
                   {"torque_source","motor reported estimate; not a calibrated external torque sensor"},
-                  {"software_version","openarm-static-v1-multi8-adaptive-proximal"},
+                  {"software_version","openarm-static-v1-multi9-opposed-vectors"},
                   {"sampling_schema","continuous-window-v1"}};
     try {
         if (output_root.empty()) {
@@ -1503,15 +1512,17 @@ int main(int argc, char** argv) {
                 const auto& cfg=plan.at("config");
                 const std::string base=pose.at("base_pose_id").get<std::string>();
                 const int sign=pose.at("approach_command_sign").get<int>();
+                const Vec axis_sign=pose.contains("approach_axis_sign") ? vector7(pose,"approach_axis_sign") : Vec{1,1,1,1,1,1,1};
                 const double minimum=cfg.at("minimum_actual_approach_rad").get<double>();
                 Vec signed_motion{};bool passed=true;
                 for(int i=0;i<N;++i) {
-                    signed_motion[i]=sign*(measured_mean[i]-pre_actual[i]);
+                    signed_motion[i]=sign*axis_sign[i]*(measured_mean[i]-pre_actual[i]);
                     passed=passed && signed_motion[i]>=minimum;
                 }
                 Json check{{"pose_id",name},{"base_pose_id",base},{"mean_q_rad",measured_mean},
                            {"pre_actual_q_rad",pre_actual},{"signed_approach_delta_rad",signed_motion},
-                           {"approach_command_sign",sign},{"repetition",pose.at("repetition")}};
+                           {"approach_command_sign",sign},{"approach_axis_sign",axis_sign},
+                           {"repetition",pose.at("repetition")}};
                 const bool new_base=std::find(measured_base_names.begin(),measured_base_names.end(),base)==measured_base_names.end();
                 if(new_base) {
                     const double distinct=cfg.at("minimum_distinct_pose_rad").get<double>();
