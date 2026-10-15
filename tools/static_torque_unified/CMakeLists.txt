@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.16)
+project(openarm_static_torque LANGUAGES CXX)
+find_package(nlohmann_json 3.2 REQUIRED)
+find_package(Threads REQUIRED)
+add_executable(openarm_static_torque openarm_static_torque.cpp)
+target_compile_features(openarm_static_torque PRIVATE cxx_std_17)
+target_compile_options(openarm_static_torque PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(openarm_static_torque PRIVATE nlohmann_json::nlohmann_json Threads::Threads)

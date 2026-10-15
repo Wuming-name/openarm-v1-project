@@ -1,0 +1,94 @@
+OpenArm V1 七关节右臂：统一启动说明
+版本：openarm-static-v1-multi3-unified
+
+本更新解决操作繁琐、故障帧未保存的问题；没有声称修好了 J7 跟随不足。
+不自动增加 KP/KD、力矩报警阈值、位置跟踪误差阈值或运动幅度。
+默认不使能；必须显式 --execute 并在 C++ 提示时输入 RUN_STATIC。
+
+一、文件放置
+将本压缩包内文件直接放到 Ubuntu：
+/home/lsk/openarm_v1_ws/src/openarm-v1-project/tools/static_torque/
+与原 CMakeLists.txt 同级，不要多套一层目录。
+同名源码覆盖；不删除 .venv、build、本地配置、models 或实验数据。
+
+新增 run_static_test.py：统一入口，自动构建、检查 CAN、读取七关节、
+建立本次快照、生成模型筛选过的计划、运行、显示故障并在正常完成后生成对比结果。
+更新 openarm_static_torque.cpp：增加 --version、完整故障帧与 KP/KD 请求值记录。
+其余 Python 工具和模板一并提供，避免各版本不一致。
+
+二、准备依赖（只在缺少时执行）
+cd ~/openarm_v1_ws/src/openarm-v1-project/tools/static_torque
+sudo apt install build-essential cmake nlohmann-json3-dev python3-venv
+若 .venv/bin/python 不存在：python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+已有 mujoco==3.3.7 的环境不必重复安装。
+模型及其 mesh 应已在：
+~/openarm_v1_ws/src/openarm-v1-project/models/openarm_v1_right/openarm_v1_7dof.xml
+
+三、每次开机的统一运行命令
+cd ~/openarm_v1_ws/src/openarm-v1-project/tools/static_torque
+.venv/bin/python -u run_static_test.py --setup-can --execute
+
+使用普通用户运行整个脚本，不要 sudo python。
+--setup-can 仅通过 sudo 将 can0 配置为仲裁 1 Mbps、数据 5 Mbps 的 CAN-FD，
+sample-point/dsample-point=0.75、dsjw=2、restart-ms=0。
+若 CAN 已正确配置，可省略 --setup-can。
+运行前关闭所有其他 CAN 查询、monitor 和控制程序。
+初始诊断阶段电机必须失能，机械臂必须稳定且有支撑；脚本不会主动失能一个正在保持的机械臂。
+确认运动前移除测量时的承重接触，防坠保护始终保留。
+
+四、默认测试内容和流程
+默认只执行 J7 +3° 诊断：起点保持采样 -> J7 +3° -> 返回起点。
+J1-J6 的目标位置固定，但仍有反馈和保护检查。
+先自动读取全部电机参数和约 10 秒反馈，以本次读数建立计划；
+控制器使能前还会重新确认当前读数与计划一致。
+不再手动运行 --diagnose、不再查找 latest、不再输入快照或计划路径。
+这种自动读取必须保留，旧快照不能代表开机后的实际位置。
+显示 RUN_STATIC 后输入 RUN_STATIC 才能使能运动。
+正常结束后仍保持起点，安装支撑后输入 SUPPORTED 才会尝试失能退出。
+故障/中断时会尝试失能，未确认电机实际失能；检查物理保护和真实电机状态。
+不会自动重试或接着执行其他姿态。
+
+当前 J7 已知可能跟随不足，保持原参数的诊断仍可能因跟踪误差停止。
+此更新的作用是把本次真正触发的反馈与具体原因一次记录完整，便于确定控制问题，
+不是通过放宽保护让失败的跟随测试变成“通过”。
+
+五、只检查通信，不使能
+.venv/bin/python -u run_static_test.py --setup-can
+
+六、历史运行资格文件
+默认使用已完成的一度 pilot：
+~/experiments/torque_compare/static_1792044758710916613/
+这里只用于核实历史实际运动资格；起点永远来自本次实时读取。
+若移动过这个数据目录，使用 --previous-run 指定新位置。
+不要指向刚才 completed=false 的停止数据，程序会拒绝。
+例如：
+.venv/bin/python -u run_static_test.py --setup-can --execute --previous-run /完整路径/已完成的pilot目录
+
+七、结果保存
+~/experiments/torque_compare/session_日期_时间_唯一编号/
+  session.json                 本次步骤、计划与采集目录
+  diagnose_*/                  本次读取及快照
+  prepared/                    本次 plan、模型副本、候选筛选结果
+  static_*/metadata.json       执行状态、配置、准确故障帧 safety_fault（若触发相应保护）
+  static_*/samples.csv         角度(rad)、速度(rad/s)、估算力矩、目标位置、温度等
+  static_*/timing.csv*         CAN 时序记录
+  static_*/comparison/         完成采集后自动生成的实测/模型比较
+报错时终端会输出完整目录，无须手动寻找 latest。
+参数读取或通信失败可能发生在建立 samples.csv 之前，此时查看 metadata 和时序日志。
+模型零位/质量/真实输出力矩标度未核准，比较结果仍为探索性数据。
+
+八、已有故障数据离线查看
+.venv/bin/python run_static_test.py --inspect-run /完整路径/static_某次编号
+这条命令不配置 CAN、不编译、不访问电机。
+
+九、更大范围多姿态（当前不应直接使用）
+--mode multi --max-angle-deg 5
+保留旧的实际运动资格和模型路径筛选；目前七关节没有足够运动验证，可能会直接拒绝。
+不得把 --mode multi 当作绕过 J7 跟随故障的办法。
+
+十、验证范围
+统一入口流程测试 9 项，现有离线算法回归测试 26 项通过。
+覆盖前置步骤失败禁止执行、故障不重试、使用本次快照、只读默认行为等。
+本地 Windows 未编译 Linux SocketCAN C++，未连接实机验证运动；
+Ubuntu 首次启动会在任何 CAN 配置和电机读取前自动编译并检查版本号。
