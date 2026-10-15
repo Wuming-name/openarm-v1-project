@@ -17,6 +17,8 @@ from pathlib import Path
 PMAX = [12.5]*7
 TMAX = [54,54,28,28,10,10,10]
 PERIOD = 0.05
+LOCAL_SCOPES = {"local_pilot_1deg": (0.120001, 0.017454),
+                "screened_multi_pose_15deg": (0.350001, math.radians(15)+1e-6)}
 
 
 def sha256(path):
@@ -50,7 +52,7 @@ def number(cfg, key, low, high):
 
 
 def validate_config(cfg):
-    pilot=cfg.get("experiment_scope")=="local_pilot_1deg"
+    pilot=cfg.get("experiment_scope") in LOCAL_SCOPES
     flags=("holding_gains_verified","fall_protection_confirmed") if pilot else (
         "motion_limits_reviewed", "geometry_and_mass_reviewed", "fall_protection_confirmed")
     for flag in flags:
@@ -98,8 +100,9 @@ def validate_config(cfg):
         if kp!=[35,35,20,20,6,6,6] or kd!=[4,4,2,2,0.8,0.8,0.8]:
             raise ValueError("pilot requires the holding gains verified by the operator")
         caps=[2,2,1.5,1.5,0.7,0.7,0.7]
-        if any(torque[i]>caps[i] or speed[i]>0.15 or low[i]<baseline[i]-0.120001 or
-               high[i]>baseline[i]+0.120001 for i in range(7)):
+        envelope,_=LOCAL_SCOPES[cfg["experiment_scope"]]
+        if any(torque[i]>caps[i] or speed[i]>0.15 or low[i]<baseline[i]-envelope or
+               high[i]>baseline[i]+envelope for i in range(7)):
             raise ValueError("pilot software alarm/envelope exceeds initial small-motion scope")
         if cfg["tracking_alarm_rad"]>0.03 or cfg["transit_speed_rad_s"]>0.005 or cfg["transit_accel_rad_s2"]>0.01:
             raise ValueError("pilot tracking/speed/acceleration exceeds initial scope")
@@ -236,6 +239,7 @@ def compare(args):
     out=run/"comparison"
     out.mkdir(exist_ok=False)
     groups={}; accepted=0; rejected=0
+    failed_movement={item['pose_id'] for item in meta.get('movement_checks',[]) if not item.get('passed')}
     fields=["time_s","pose_id","joint","q_motor_rad","q_model_rad","torque_feedback_nm",
             "model_gravity_nm","model_passive_nm","residual_nm","mos_c","coil_c",
             "zero_sensitivity_nm_per_rad","linear_zero_uncertainty_nm"]
@@ -244,6 +248,7 @@ def compare(args):
         reader=csv.DictReader(stream); writer=csv.DictWriter(dest,fieldnames=fields); writer.writeheader()
         for row in reader:
             if row["stage"]!="sample": continue
+            if row['pose_id'] in failed_movement: rejected+=1; continue
             q=[float(row[f"q{i}"]) for i in range(1,8)]
             dq=[float(row[f"dq{i}"]) for i in range(1,8)]
             tau=[float(row[f"tau{i}"]) for i in range(1,8)]
@@ -298,6 +303,7 @@ def compare(args):
             "zero_calibration_status":plan["zero_calibration_status"],
             "feedback_is_joint_nm_confirmed":cfg["feedback_is_joint_nm_confirmed"],
             "experiment_scope":cfg.get("experiment_scope","reviewed_full"),
+            "movement_checks":meta.get('movement_checks',[]),
             "interpretation":"Residual includes zero/model/friction/current-to-torque errors; not a calibrated accuracy certificate. Zero bound is first-order only, not a guaranteed error bound."}
     save_json(out/"report.json",report)
     print(f"Comparison: {out}; valid rounds={accepted}; complete={complete}")

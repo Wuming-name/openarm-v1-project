@@ -942,7 +942,9 @@ Settings load_settings(const Json& plan) {
     if (plan.at("schema") != "openarm-static-v1" || !plan.at("model_path_checked").get<bool>())
         throw std::runtime_error("Use torque_model.py prepare to create the plan first");
     const auto& cfg = plan.at("config");
-    const bool pilot=cfg.value("experiment_scope",std::string{})=="local_pilot_1deg";
+    const auto scope=cfg.value("experiment_scope",std::string{});
+    const bool multi=scope=="screened_multi_pose_15deg";
+    const bool pilot=scope=="local_pilot_1deg" || multi;
     if (pilot) {
         if (!cfg.at("holding_gains_verified").get<bool>() || !cfg.at("fall_protection_confirmed").get<bool>())
             throw std::runtime_error("pilot requires verified holding gains and fall protection");
@@ -984,7 +986,8 @@ Settings load_settings(const Json& plan) {
         for (int i=0;i<N;++i) {
             if (std::abs(origin[i]-expected[i])>1e-9 || KP[i]!=verified_kp[i] || KD[i]!=verified_kd[i] ||
                 TORQUE_ALARM[i]>torque_caps[i] || SPEED_ALARM[i]>0.15 ||
-                QMIN[i]<origin[i]-0.120001 || QMAX[i]>origin[i]+0.120001)
+                QMIN[i]<origin[i]-(multi ? 0.350001 : 0.120001) ||
+                QMAX[i]>origin[i]+(multi ? 0.350001 : 0.120001))
                 throw std::runtime_error("pilot config exceeds verified gain/local envelope/alarm scope");
         }
         if (TRACK_ALARM>0.03 || s.speed>0.005 || s.accel>0.01)
@@ -993,9 +996,13 @@ Settings load_settings(const Json& plan) {
             const Vec q=vector7(pose,"q_motor_rad");
             double total=0;
             for(int i=0;i<N;++i) total+=std::abs(q[i]-origin[i]);
-            if (total>0.017454) throw std::runtime_error("pilot target exceeds one-degree total offset");
+            int changed=0;
+            for(int i=0;i<N;++i) if(std::abs(q[i]-origin[i])>1e-6) ++changed;
+            if (total>(multi ? 0.261801 : 0.017454) || changed>1)
+                throw std::runtime_error("target exceeds screened single-joint angular scope");
         }
-        std::cout << "LOCAL PILOT: nominal one-degree excursions; unknown mass/zero; exploratory data only.\n";
+        std::cout << (multi ? "SCREENED MULTI-POSE: up to 15deg; low alarms/gains unchanged; actual movement checked.\n" :
+                             "LOCAL PILOT: nominal one-degree excursions; unknown mass/zero; exploratory data only.\n");
     }
     return s;
 }
@@ -1130,7 +1137,7 @@ int main(int argc, char** argv) {
     Json metadata{{"completed",false},{"mode", execute ? "static_motion" : "diagnose"},
                   {"interface",CAN_INTERFACE},{"period_s",PERIOD_S},
                   {"torque_source","motor reported estimate; not a calibrated external torque sensor"},
-                  {"software_version","openarm-static-v1-pilot1"}};
+                  {"software_version","openarm-static-v1-multi1"}};
     try {
         if (output_root.empty()) {
             const char* home=std::getenv("HOME");
@@ -1200,11 +1207,30 @@ int main(int argc, char** argv) {
         current=arm.enable_at(fresh.q); guard(current,settings,&fresh.q);
         if (!current.sample_valid) throw std::runtime_error("post-enable timing invalid");
         hold_static(arm,current,fresh.q,settings,log,cycle,"initial_hold",false);
+        const Vec held_origin=current.q;
+        const bool verify_excursion=plan.at("config").value("experiment_scope",std::string{})=="screened_multi_pose_15deg";
         for(const auto& pose : poses) {
             const auto name=pose.at("pose_id").get<std::string>();
             const Vec target=vector7(pose,"q_motor_rad");
             move_static(arm,current,target,settings,log,cycle,name);
             hold_static(arm,current,target,settings,log,cycle,name,true);
+            if (verify_excursion) {
+                Json check{{"pose_id",name},{"passed",true}};
+                for(int i=0;i<N;++i) {
+                    const double requested=target[i]-expected[i];
+                    if (std::abs(requested)>1e-6) {
+                        const double measured=current.q[i]-held_origin[i];
+                        const bool passed=requested*measured>0 && std::abs(measured)>=0.5*std::abs(requested);
+                        check["joint"]=i+1; check["requested_delta_rad"]=requested;
+                        check["actual_delta_rad"]=measured; check["passed"]=passed;
+                        std::cout << name << ": measured excursion=" << measured*180.0/3.141592653589793 << " deg\n";
+                    }
+                }
+                if (!metadata.contains("movement_checks")) metadata["movement_checks"]=Json::array();
+                metadata["movement_checks"].push_back(check);
+                if (!check.at("passed").get<bool>())
+                    throw std::runtime_error("insufficient actual excursion; this pose must not count as moved");
+            }
         }
         move_static(arm,current,fresh.q,settings,log,cycle,"return_start");
         hold_static(arm,current,fresh.q,settings,log,cycle,"return_start",false);
