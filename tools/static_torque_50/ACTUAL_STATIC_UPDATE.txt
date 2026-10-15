@@ -1,0 +1,60 @@
+50 姿态：按实测静止角度采集（multi6-actual-static）
+
+本次日志已确认：
+pose_01 合格，60 条完整稳定采样、1/50 个实测不同姿态。
+pose_02 在稳定采样前超时，最后判据为 J4:settle_position_error。
+J4 目标 0.208476386664 rad，实际 0.166514076448 rad，
+差 0.041962310216 rad，约 2.404°，超过原采样要求 0.04 rad（2.292°）。
+最后一帧速度 0.002442 rad/s，反馈估算力矩 0.813675 Nm，未触发对应运动保护。
+它符合负载下纯 PD 持位偏差的表现，但仅凭最后一帧不能证明完整窗口静止稳定。
+KP=20 的位置项约 0.839 Nm，与反馈量级一致；这不是独立的力矩标定结果。
+
+为什么修改：
+实验比较的是“实际七关节角度对应的真实反馈力矩与 MuJoCo 重力力矩”，
+并非目标位置跟踪精度实验。不应因为关节稳定在目标附近而一直拒绝采样。
+仍须有目标附近的有界偏差、实测运动量和姿态差异验证，不能任意偏离目标。
+
+本次明确改变的是采样接纳策略，不是运动保护：
+1. 仅 legacy_static_50 的正式采样使用 measurement_position_policy=actual_static。
+2. 正式采样允许目标偏差上限 0.08 rad（4.584°）；不是取消偏差要求。
+3. 起点使能持位、返回起点和其他旧模式保留原 0.04rad 稳定位置要求。
+4. 速度 <=0.04rad/s、位置窗口波动 <=0.003rad、连续稳定窗口及3秒采集保持。
+5. 0.16rad 跟踪保护、实测限位、速度/力矩/温度/通信保护均保持。
+6. 每个目标对应的实测最大关节运动仍须达到请求最大运动至少一半，
+   且与此前每个实测姿态至少有一个关节相差1°。
+7. 模型比较始终使用每行实际角度；新离线检查也会拒绝偏差超过0.08rad的采样。
+8. KP/KD、零前馈、运动速度、50目标规划范围及力矩报警未改变。
+
+这会允许本次 J4=0.04196rad 偏差通过“采样位置偏差”这一项，
+是否最终采样合格仍由完整的速度、波动、时序、姿态差异等检查决定。
+不承诺全部50个姿态一定能完成，不为了收齐数据提高增益或力矩阈值。
+模型只做名义路径筛选；真实零位、质量及几何安全仍未独立核准。
+
+更新文件（必须一起覆盖）：
+openarm_static_torque.cpp
+run_static_test.py
+prepare_static_50.py
+torque_model.py
+
+Ubuntu 更新：
+将 openarm_static_50_actual_static_update.zip 传到 /home/lsk/。
+cd ~/openarm_v1_ws/src/openarm-v1-project/tools/static_torque_50
+tar -czf "$HOME/static50_before_actual_static_$(date +%Y%m%d_%H%M%S).tar.gz" openarm_static_torque.cpp run_static_test.py prepare_static_50.py torque_model.py
+python3 -m zipfile -e "$HOME/openarm_static_50_actual_static_update.zip" "$PWD"
+
+运行：
+.venv/bin/python -u run_static_50.py --setup-can --execute --max-angle-deg 20
+启动自动重新编译、重新读取当前位置和生成计划，不要手动继续旧计划。
+应该看到 ACTUAL STATIC measurement: ... capture deviation <= 0.08rad。
+./build/openarm_static_torque --version 应显示 openarm-static-v1-multi6-actual-static。
+不需要重装依赖或重建虚拟环境。
+
+保存内容与上版一致，保留原始数据，不覆盖历史实验。
+原始 CSV 的 cmd1..cmd7 与 q1..q7 可用于另行分析跟踪偏差；
+comparison/poses_actual.csv 的角度和重力力矩均基于实际反馈角度。
+
+初始机械臂需已支撑且失能；RUN_STATIC 前取消承重接触、保留防坠。
+正常结束安装支撑再 SUPPORTED；异常仅尽力发送失能，仍需确认真实状态。
+
+验证：新增检查覆盖本次 J4 偏差样例、偏差上限不可无限扩大、缺少目标字段拒绝等；
+纯 Python 回归测试通过。C++ 未在本地编译、未实机验证；Ubuntu 启动先编译。

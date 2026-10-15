@@ -937,6 +937,8 @@ struct Settings {
     double position_error = 0.04, still_speed = 0.04, position_spread = 0.003;
     double stable_seconds = 1;
     int min_samples = 40;
+    bool actual_static_measurement = false;
+    double capture_error = .08;
 };
 Settings load_settings(const Json& plan) {
     if (plan.at("schema") != "openarm-static-v1" || !plan.at("model_path_checked").get<bool>())
@@ -1006,6 +1008,11 @@ Settings load_settings(const Json& plan) {
                              "LOCAL PILOT: nominal one-degree excursions; unknown mass/zero; exploratory data only.\n");
     }
     if (legacy) {
+        const auto policy=cfg.value("measurement_position_policy",std::string("target_tracking"));
+        if(policy!="target_tracking" && policy!="actual_static")
+            throw std::runtime_error("unknown measurement position policy");
+        s.actual_static_measurement=policy=="actual_static";
+        if(s.actual_static_measurement) s.capture_error=bounded(cfg,"static_capture_error_rad",.04,std::min(.08,TRACK_ALARM));
         const Vec old_kp{35,35,20,20,6,6,6}, old_kd{4,4,2,2,.8,.8,.8};
         const Vec old_low{-1.396263,-.174533,-1.570796,0,-1.570796,-.785398,-1.570796};
         const Vec old_high{3.490659,3.316125,1.570796,2.443461,1.570796,.785398,1.570796};
@@ -1040,6 +1047,9 @@ Settings load_settings(const Json& plan) {
         std::cout << "LEGACY STATIC 50: supplied KP/KD; up to configured 10-30deg per joint.\n"
                      "Tracking alarm 0.16rad maximum; lower torque alarms retained.\n"
                      "Nominal model paths only: physical zero/mass/clearance remain unverified.\n";
+        if(s.actual_static_measurement)
+            std::cout << "ACTUAL STATIC measurement: compare at measured angles; capture deviation <= "
+                      << s.capture_error << "rad. Initial/return holds retain strict target tolerance.\n";
     }
     return s;
 }
@@ -1159,6 +1169,8 @@ void hold_static(Arm& arm, State& current, const Vec& target, const Settings& se
     const auto start = Clock::now();
     std::deque<State> history;
     last_quality_event=Json::object();
+    const bool actual_static=collect && settings.actual_static_measurement;
+    const double position_capture_limit=actual_static ? settings.capture_error : settings.position_error;
     bool sampling = false;
     int valid_count = 0;
     int segment=0, restarts=0;
@@ -1175,8 +1187,8 @@ void hold_static(Arm& arm, State& current, const Vec& target, const Settings& se
         if(cycle.gap_ms>1000*MAX_SAMPLE_GAP_S) reasons.push_back("control_sample_gap");
         bool good = current.sample_valid && cycle.gap_ms <= 1000*MAX_SAMPLE_GAP_S;
         for (int i=0; i<N; ++i) {
-            if(std::abs(current.q[i]-target[i])>settings.position_error) {
-                reasons.push_back("J"+std::to_string(i+1)+":settle_position_error"); good=false;
+            if(std::abs(current.q[i]-target[i])>position_capture_limit) {
+                reasons.push_back("J"+std::to_string(i+1)+(actual_static ? ":static_capture_error" : ":settle_position_error")); good=false;
             }
             if(std::abs(current.dq[i])>settings.still_speed) {
                 reasons.push_back("J"+std::to_string(i+1)+":settle_velocity"); good=false;
@@ -1214,7 +1226,7 @@ void hold_static(Arm& arm, State& current, const Vec& target, const Settings& se
             last_quality_event["sample_valid"]=current.sample_valid;
             last_quality_event["cycle_gap_ms"]=cycle.gap_ms;
             last_quality_event["max_kernel_age_ms"]=current.max_kernel_age_ms;
-            last_quality_event["limits"]={{"position_error_rad",settings.position_error},
+            last_quality_event["limits"]={{"position_error_rad",position_capture_limit},
                 {"velocity_rad_s",settings.still_speed},{"position_spread_rad",settings.position_spread},
                 {"sample_gap_ms",1000*MAX_SAMPLE_GAP_S},{"timeout_s",settings.settle_timeout+settings.dwell}};
         }
@@ -1268,7 +1280,7 @@ int main(int argc, char** argv) {
     for (int n=1; n<argc; ++n) {
         const std::string arg=argv[n];
         if (arg=="--version") {
-            std::cout << "openarm-static-v1-multi5-resettle\n"; return 0;
+            std::cout << "openarm-static-v1-multi6-actual-static\n"; return 0;
         } else if (arg=="--help") {
             std::cout << "openarm_static_torque [--diagnose] [--interface can0] [--output-root DIR]\n"
                          "openarm_static_torque --plan PLAN.json --execute [--interface can0]\n"; return 0;
@@ -1287,7 +1299,7 @@ int main(int argc, char** argv) {
     Json metadata{{"completed",false},{"mode", execute ? "static_motion" : "diagnose"},
                   {"interface",CAN_INTERFACE},{"period_s",PERIOD_S},
                   {"torque_source","motor reported estimate; not a calibrated external torque sensor"},
-                  {"software_version","openarm-static-v1-multi5-resettle"},
+                  {"software_version","openarm-static-v1-multi6-actual-static"},
                   {"sampling_schema","continuous-window-v1"}};
     try {
         if (output_root.empty()) {

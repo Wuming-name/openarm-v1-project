@@ -56,6 +56,9 @@ def number(cfg, key, low, high):
 def validate_config(cfg):
     pilot=cfg.get("experiment_scope") in LOCAL_SCOPES
     legacy=cfg.get('experiment_scope')==LEGACY_SCOPE
+    policy=cfg.get('measurement_position_policy','target_tracking')
+    if policy not in ('target_tracking','actual_static') or (policy=='actual_static' and not legacy):
+        raise ValueError('Actual-static measurement is only supported by the explicit 50-pose profile')
     flags=("holding_gains_verified","fall_protection_confirmed") if pilot or legacy else (
         "motion_limits_reviewed", "geometry_and_mass_reviewed", "fall_protection_confirmed")
     for flag in flags:
@@ -110,6 +113,8 @@ def validate_config(cfg):
         if cfg["tracking_alarm_rad"]>0.03 or cfg["transit_speed_rad_s"]>0.005 or cfg["transit_accel_rad_s2"]>0.01:
             raise ValueError("pilot tracking/speed/acceleration exceeds initial scope")
     if legacy:
+        if policy=='actual_static':
+            number(cfg,'static_capture_error_rad',.04,min(.08,cfg['tracking_alarm_rad']))
         vector7(cfg,'pilot_baseline_q_motor_rad')
         if kp!=[35,35,20,20,6,6,6] or kd!=[4,4,2,2,0.8,0.8,0.8]:
             raise ValueError('50-pose profile must retain supplied legacy KP/KD')
@@ -246,6 +251,17 @@ def row_in_accepted_window(row,meta):
             str(row.get('sample_segment',''))==str(segment))
 
 
+def within_capture_bound(row,cfg):
+    if cfg.get('measurement_position_policy','target_tracking')!='actual_static':
+        return True
+    try:
+        return all(math.isfinite(float(row[f'cmd{i}'])) and
+                   abs(float(row[f'q{i}'])-float(row[f'cmd{i}']))<=cfg['static_capture_error_rad']
+                   for i in range(1,8))
+    except (KeyError,ValueError,TypeError):
+        return False
+
+
 def prepare(args):
     cfg=read_json(args.config); validate_config(cfg)
     snapshot=read_json(args.snapshot)
@@ -316,7 +332,7 @@ def compare(args):
                               abs(tau[i])<=cfg["torque_alarm_nm"][i] and
                               float(row[f"mos{i+1}"])<cfg["temperature_alarm_c"] and
                               float(row[f"coil{i+1}"])<cfg["temperature_alarm_c"] for i in range(7))
-            if not good: rejected+=1; continue
+            if not good or not within_capture_bound(row,cfg): rejected+=1; continue
             gravity,passive,contacts=model.evaluate(q)
             if contacts or not all(math.isfinite(x) for x in gravity+passive) or any(abs(x)>1e-4 for x in passive):
                 rejected+=1; continue

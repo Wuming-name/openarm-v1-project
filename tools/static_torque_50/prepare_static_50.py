@@ -25,6 +25,7 @@ def make_config(template,model_path,baseline,model_low,model_high,angle):
                tracking_alarm_rad=.16,transit_speed_rad_s=.05,
                transit_accel_rad_s2=.08,speed_alarm_rad_s=[.5]*7,
                settle_position_error_rad=.04,startup_tolerance_rad=.01,
+               measurement_position_policy='actual_static',static_capture_error_rad=.08,
                stable_seconds=1,sample_seconds=3,minimum_valid_samples=40,
                settle_timeout_s=30,path_margin_rad=.04,
                requested_pose_count=50,max_excursion_rad=math.radians(angle),
