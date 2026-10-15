@@ -10,6 +10,9 @@
             dbitrate 5000000 dsample-point 0.75 dsjw 2 fd on restart-ms 0
         sudo ip link set can0 up
         ip -details -statistics link show can0
+    获取新的起始姿态:
+        ./build/openarm_static_torque --diagnose --interface can0
+        必须有该诊断过程读取关节角度信息后续程序会读取这次记录的信息防止越位
     生成本次运动计划：  
         PILOT_DIR="$HOME/experiments/torque_compare/pilot_$(date +%Y%m%d_%H%M%S)"
         .venv/bin/python prepare_local_pilot.py \
