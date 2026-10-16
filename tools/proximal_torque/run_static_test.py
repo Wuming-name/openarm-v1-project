@@ -135,6 +135,8 @@ def main(argv=None):
     parser.add_argument('--repeats',type=int,choices=[1,2,3],default=1)
     parser.add_argument('--torque-profile',choices=['legacy_low','proximal_5_3'],default='legacy_low')
     parser.add_argument('--short-test',action='store_true',help='Two-base proximal holding validation; not full 50-base coverage')
+    parser.add_argument('--min-j4-span-deg',type=int,choices=[0,20,30,40,50,60],default=0)
+    parser.add_argument('--min-j3-model-span-nm',type=float,choices=[0,.2,.3,.4,.5,.6],default=0)
     parser.add_argument('--max-angle-deg', type=int, choices=[5,10,15,20,30])
     parser.add_argument('--previous-run', type=Path, default=Path.home() / 'experiments/torque_compare/static_1792044758710916613',
                         help='Completed pilot used for measured-movement eligibility; never used as current position')
@@ -232,6 +234,8 @@ def main(argv=None):
                          '--min-proximal-span-deg',str(args.min_proximal_span_deg),
                          '--approach-deg',str(args.approach_deg),'--repeats',str(args.repeats)]
                 command+=['--torque-profile',args.torque_profile]
+                command+=['--min-j4-span-deg',str(args.min_j4_span_deg),
+                          '--min-j3-model-span-nm',str(args.min_j3_model_span_nm)]
                 if args.short_test:command+=['--short-test']
             elif args.mode=='pose50':
                 command=[sys.executable,HERE/'prepare_static_50.py','--snapshot',diagnosis/'snapshot.json',

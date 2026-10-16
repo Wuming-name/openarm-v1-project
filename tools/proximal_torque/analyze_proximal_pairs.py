@@ -6,6 +6,7 @@ import math
 from pathlib import Path
 import statistics
 import torque_model as tm
+from analyze_directional import write_analysis
 
 
 def pair_rows(plan,summary,angle_tolerance_deg=.5):
@@ -74,6 +75,7 @@ def main():
                      'interpretation':'Even/odd residual components are diagnostics using model gravity at EACH actual configuration. '
                                       'Motor mean is not certified gravity. Unmatched angles, friction asymmetry and torque scaling prevent direct calibration.'})
         print('Paired diagnostics:',out/'paired_directions.csv',flush=True)
+        write_analysis(rows,out,plan['config'],report.get('validation_only',False))
         return 0
     except (ValueError,KeyError,OSError,TypeError) as exc:
         parser.exit(1,f'ERROR: {exc}\n')

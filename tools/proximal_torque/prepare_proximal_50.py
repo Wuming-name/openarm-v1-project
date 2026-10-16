@@ -217,6 +217,10 @@ def select_adaptive(model,cfg,q,max_span,progress=False):
                            f'opposed-vector endpoints passed {len(pool)}.',flush=True)
     endpoint_pool=list(pool)
     selected=[];selected_g=[];path_trials=0
+    j4_required=math.radians(cfg.get('minimum_j4_nominal_span_deg',0))
+    g3_required=cfg.get('minimum_j3_model_span_nm',0)
+    if not (0<=j4_required<=math.radians(90)) or not (0<=g3_required<=3):
+        raise ValueError('Invalid J4/J3 experimental coverage requirements')
     required=cfg['minimum_proximal_actual_span_rad']+2*cfg['static_capture_error_rad']
     # Restore the controller's existing 5deg target separation. Capture error
     # is not a measured inter-pose displacement; C++ still requires distinct
@@ -226,13 +230,19 @@ def select_adaptive(model,cfg,q,max_span,progress=False):
         values=[r['q_motor_rad'][i] for r in rows]
         return max(values)-min(values) if values else 0
     while pool and len(selected)<50:
-        lows=[min((r['q_motor_rad'][i] for r in selected),default=0) for i in (0,1)]
-        highs=[max((r['q_motor_rad'][i] for r in selected),default=0) for i in (0,1)]
+        lows=[min((r['q_motor_rad'][i] for r in selected),default=0) for i in range(4)]
+        highs=[max((r['q_motor_rad'][i] for r in selected),default=0) for i in range(4)]
         def score(row):
             if not selected:return (0,0,-old.distance(q,row['q_motor_rad']))
             v=row['q_motor_rad']
             spans=[max(highs[i],v[i])-min(lows[i],v[i]) for i in (0,1)]
-            return (min(spans[0],required)+min(spans[1],required),row['nearest'],sum(spans))
+            coverage_score=sum(min(s/required,1) for s in spans)
+            if j4_required:
+                coverage_score+=min((max(highs[3],v[3])-min(lows[3],v[3]))/j4_required,1)
+            if g3_required:
+                gs=[g[2] for g in selected_g]+[checked.point(v)[2]]
+                coverage_score+=min((max(gs)-min(gs))/g3_required,1)
+            return (coverage_score,row['nearest'],sum(spans))
         pool.sort(key=score,reverse=True)
         accepted=False
         while pool:
@@ -274,10 +284,19 @@ def select_adaptive(model,cfg,q,max_span,progress=False):
                 'minimum_nominal_base_spacing_deg':math.degrees(spacing),
                 'minimum_actual_span_deg':math.degrees(cfg['minimum_proximal_actual_span_rad']),
                 'max_searched_span_deg':max_span,'config':cfg,'executable_plan_created':False}
-    if len(selected)!=50 or any(span(selected,i)<required-1e-9 for i in (0,1)):
+    g3_span=max((g[2] for g in selected_g),default=0)-min((g[2] for g in selected_g),default=0)
+    assessment.update(nominal_j4_span_deg=math.degrees(span(selected,3)),
+                      model_j3_span_nm=g3_span,
+                      required_j4_nominal_span_deg=math.degrees(j4_required),
+                      required_j3_model_span_nm=g3_required,
+                      endpoint_only_j4_span_deg=math.degrees(span(endpoint_pool,3)))
+    if (len(selected)!=50 or any(span(selected,i)<required-1e-9 for i in (0,1))
+            or span(selected,3)<j4_required-1e-9 or g3_span<g3_required-1e-9):
         error=ValueError(f'Adaptive search did not find 50 path-connected bases with required shoulder coverage; '
                          f'selected={len(selected)}, spans_deg={assessment["selected_path_checked_shoulder_spans_deg"]}, '
                          f'required_nominal_deg={math.degrees(required):.3f}; '
+                         f'J4 nominal span={math.degrees(span(selected,3)):.2f}/{math.degrees(j4_required):.2f}deg; '
+                         f'J3 model span={g3_span:.3f}/{g3_required:.3f}Nm; '
                          f'primary model rejections={checked.rejections.most_common(8)}. No executable plan created.')
         error.assessment=assessment;raise error
     # Order chosen configurations by nearest transit; recheck every actual leg.
@@ -376,6 +395,10 @@ def main():
     parser.add_argument('--repeats',type=int,choices=[1,2,3],default=1)
     parser.add_argument('--torque-profile',choices=['legacy_low','proximal_5_3'],default='legacy_low')
     parser.add_argument('--short-test',action='store_true',help='Two-base holding validation; not a full coverage experiment')
+    parser.add_argument('--min-j4-span-deg',type=int,choices=[0,20,30,40,50,60],default=0,
+                        help='Minimum NOMINAL target span; does not enlarge joint limits')
+    parser.add_argument('--min-j3-model-span-nm',type=float,choices=[0,.2,.3,.4,.5,.6],default=0,
+                        help='Minimum predicted gravity range, not motor torque threshold')
     args=parser.parse_args()
     try:
         snap,_,q=pp.fresh_snapshot(args.snapshot,Path.home()/'experiments/torque_compare')
@@ -389,7 +412,11 @@ def main():
                         [float(raw.jnt_range[j,0]) for j in ids],[float(raw.jnt_range[j,1]) for j in ids],
                         args.min_proximal_span_deg,args.approach_deg,args.repeats,args.torque_profile)
         print('Explicit torque profile:',cfg['torque_profile'],'software alarms Nm:',cfg['torque_alarm_nm'],flush=True)
+        cfg['minimum_j4_nominal_span_deg']=args.min_j4_span_deg
+        cfg['minimum_j3_model_span_nm']=args.min_j3_model_span_nm
         bases,samples,coverage=select_adaptive(tm.Model(cfg,path),cfg,q,args.max_proximal_span_deg,progress=True)
+        print('Full-plan J4 nominal span:',coverage['nominal_j4_span_deg'],'deg; J3 model gravity span:',
+              coverage['model_j3_span_nm'],'Nm. Predicted coverage, not measured coverage.',flush=True)
         if args.short_test:
             bases,samples,coverage=short_validation(cfg,bases,samples,coverage,tm.Model(cfg,path))
         duration=save_plan(tm.Model(cfg,path),cfg,path,snap,q,bases,samples,coverage,args.out.expanduser().resolve(),mujoco)
