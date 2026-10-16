@@ -54,6 +54,15 @@ def number(cfg, key, low, high):
     return value
 
 
+def proximal_base_count(cfg):
+    validation=cfg.get('validation_only',False)
+    if type(validation) is not bool:raise ValueError('validation_only must be boolean')
+    count=2 if validation else 50
+    if cfg.get('requested_pose_count')!=count:
+        raise ValueError('Validation requires 2 bases; full experiment requires 50')
+    return count
+
+
 def validate_config(cfg):
     pilot=cfg.get("experiment_scope") in LOCAL_SCOPES
     proximal=cfg.get('experiment_scope')==PROXIMAL_SCOPE
@@ -130,7 +139,7 @@ def validate_config(cfg):
         if not proximal:
             number(cfg,'max_excursion_rad',math.radians(10),math.radians(30))
         number(cfg,'minimum_distinct_pose_rad',math.radians(1),math.radians(5))
-        if cfg.get('requested_pose_count')!=50:
+        if not proximal and cfg.get('requested_pose_count')!=50:
             raise ValueError('50-pose profile requires exactly 50 targets')
         lower=[-1.396263,-.174533,-1.570796,0,-1.570796,-.785398,-1.570796]
         upper=[3.490659,3.316125,1.570796,2.443461,1.570796,.785398,1.570796]
@@ -140,6 +149,11 @@ def validate_config(cfg):
                 or cfg['path_margin_rad']<.04 or cfg['transit_accel_rad_s2']>.08):
             raise ValueError('Settings exceed legacy static-collection profile')
         if proximal:
+            base_count=proximal_base_count(cfg)
+            if 'approach_position_error_rad' in cfg:
+                approach_error=number(cfg,'approach_position_error_rad',.08,min(.10,cfg['tracking_alarm_rad']-.04))
+                if any(x<approach_error+cfg['static_capture_error_rad']+cfg['minimum_actual_approach_rad'] for x in cfg['approach_offset_rad']):
+                    raise ValueError('Approach offset too small for staging/capture deviations; choose 12 or 15deg')
             if cfg.get('proximal_layout','grid_5x5x2') not in ('grid_5x5x2','adaptive_coverage'):
                 raise ValueError('Unknown proximal layout')
             if cfg.get('approach_direction_policy','same_sign') not in ('same_sign','per_base_opposed_vectors'):
@@ -156,8 +170,8 @@ def validate_config(cfg):
             repetitions=cfg.get('repetitions')
             if type(repetitions) is not int or repetitions not in (1,2,3):
                 raise ValueError('Expected 1..3 paired repetitions')
-            if cfg.get('requested_acquisition_count')!=100*repetitions:
-                raise ValueError('50 bases need two directional acquisitions per repetition')
+            if cfg.get('requested_acquisition_count')!=2*base_count*repetitions:
+                raise ValueError('Each base needs two directional acquisitions per repetition')
 
 
 class Model:
@@ -249,7 +263,7 @@ def read_poses(path):
     return poses
 
 
-def distinct_means_ok(summary,pose_names,minimum):
+def distinct_means_ok(summary,pose_names,minimum,expected_count=50):
     """Verify measured mean configurations, independently of requested targets."""
     indexed={(s['pose_id'],s['joint']):s['q_mean_rad'] for s in summary}
     vectors=[]
@@ -260,7 +274,7 @@ def distinct_means_ok(summary,pose_names,minimum):
         if any(max(abs(a-b) for a,b in zip(q,other))<minimum for other in vectors):
             return False
         vectors.append(q)
-    return len(vectors)==50
+    return len(vectors)==expected_count
 
 
 def row_in_accepted_window(row,meta):
@@ -291,6 +305,7 @@ def within_capture_bound(row,cfg):
 
 def proximal_data_checks(summary,plan,meta):
     cfg=plan['config']; poses=plan['poses']
+    expected_count=proximal_base_count(cfg)
     index={(s['pose_id'],s['joint']):s['q_mean_rad'] for s in summary}
     checks={c['pose_id']:c for c in meta.get('pose_checks',[]) if c.get('passed')}
     first={};counts={};patterns={};all_good=True
@@ -312,10 +327,11 @@ def proximal_data_checks(summary,plan,meta):
         key=(base,p['repetition'],p['approach_command_sign'])
         counts[key]=counts.get(key,0)+1
     span=[max(v[1][i] for v in first.values())-min(v[1][i] for v in first.values()) for i in range(7)] if first else []
-    all_good=all_good and len(first)==50 and len(counts)==100*cfg['repetitions'] and all(c==1 for c in counts.values())
-    all_good=all_good and all(span[i]>=cfg['minimum_proximal_actual_span_rad'] for i in (0,1))
-    all_good=all_good and distinct_means_ok(summary,[v[0] for v in first.values()],cfg['minimum_distinct_pose_rad'])
-    all_good=all_good and meta.get('valid_distinct_pose_count')==50 and meta.get('valid_acquisition_count')==len(poses)
+    all_good=all_good and len(first)==expected_count and len(counts)==2*expected_count*cfg['repetitions'] and all(c==1 for c in counts.values())
+    if not cfg.get('validation_only',False):
+        all_good=all_good and all(span[i]>=cfg['minimum_proximal_actual_span_rad'] for i in (0,1))
+    all_good=all_good and distinct_means_ok(summary,[v[0] for v in first.values()],cfg['minimum_distinct_pose_rad'],expected_count)
+    all_good=all_good and meta.get('valid_distinct_pose_count')==expected_count and meta.get('valid_acquisition_count')==len(poses)
     return bool(all_good),span
 
 
@@ -451,6 +467,8 @@ def compare(args):
                                     [s['feedback_mean_nm'] for s in rows]+[s['gravity_mean_nm'] for s in rows]+
                                     [s['residual_mean_nm'] for s in rows])
     report={"accepted_rounds":accepted,"rejected_rounds":rejected,"acquisition_completed":meta["completed"],
+            "validation_only":cfg.get('validation_only',False),
+            "full_proximal_coverage_complete":bool(complete and cfg.get('experiment_scope')==PROXIMAL_SCOPE and not cfg.get('validation_only',False)),
             "dataset_complete":complete,"frozen_model_sha256":sha256(frozen),
             "zero_calibration_status":plan["zero_calibration_status"],
             "feedback_is_joint_nm_confirmed":cfg["feedback_is_joint_nm_confirmed"],

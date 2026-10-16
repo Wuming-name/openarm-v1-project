@@ -939,6 +939,7 @@ struct Settings {
     int min_samples = 40;
     bool actual_static_measurement = false;
     double capture_error = .08;
+    double approach_error = .08;
 };
 Settings load_settings(const Json& plan) {
     if (plan.at("schema") != "openarm-static-v1" || !plan.at("model_path_checked").get<bool>())
@@ -1065,13 +1066,22 @@ Settings load_settings(const Json& plan) {
         const Vec origin=vector7(plan,"baseline_q_motor_rad"),configured_origin=vector7(cfg,"pilot_baseline_q_motor_rad");
         const Vec extent=vector7(cfg,"max_excursion_per_joint_rad"),offset=vector7(cfg,"approach_offset_rad");
         const int repeats=cfg.at("repetitions").get<int>();
-        if(repeats<1 || repeats>3 || cfg.at("requested_pose_count").get<int>()!=50 ||
-           cfg.at("requested_acquisition_count").get<int>()!=100*repeats || plan.at("poses").size()!=size_t(100*repeats) ||
+        const bool validation=cfg.value("validation_only",false);
+        const int base_count=validation ? 2 : 50;
+        if(repeats<1 || repeats>3 || cfg.at("requested_pose_count").get<int>()!=base_count ||
+           cfg.at("requested_acquisition_count").get<int>()!=2*base_count*repeats || plan.at("poses").size()!=size_t(2*base_count*repeats) ||
            cfg.value("measurement_position_policy",std::string{})!="actual_static" ||
            s.position_error>.04 || s.startup_tolerance>.01 || s.accel>.08)
             throw std::runtime_error("invalid proximal paired acquisition settings");
         s.actual_static_measurement=true;
         s.capture_error=bounded(cfg,"static_capture_error_rad",.04,std::min(.08,TRACK_ALARM));
+        s.approach_error=cfg.contains("approach_position_error_rad") ?
+            bounded(cfg,"approach_position_error_rad",.08,std::min(.10,TRACK_ALARM-.04)) : s.capture_error;
+        if(cfg.contains("approach_position_error_rad")) {
+            const double minimum=cfg.at("minimum_actual_approach_rad").get<double>();
+            for(double x:offset) if(x<s.approach_error+s.capture_error+minimum)
+                throw std::runtime_error("approach offset too small for staging and sample deviations");
+        }
         bounded(cfg,"minimum_proximal_actual_span_rad",20*rad,60*rad);
         bounded(cfg,"minimum_actual_approach_rad",.5*rad,3*rad);
         bounded(cfg,"minimum_distinct_pose_rad",rad,5*rad);
@@ -1117,8 +1127,8 @@ Settings load_settings(const Json& plan) {
             if(mask&flag) throw std::runtime_error("duplicate acquisition direction");
             directions[key]=mask|flag;
         }
-        if(bases.size()!=50 || directions.size()!=size_t(50*repeats))
-            throw std::runtime_error("proximal plan requires 50 complete paired bases");
+        if(bases.size()!=size_t(base_count) || directions.size()!=size_t(base_count*repeats))
+            throw std::runtime_error("proximal plan has an incomplete paired-base count");
         for(const auto& value:directions) if(value.get<int>()!=3)
             throw std::runtime_error("missing direction of a proximal pair");
         std::vector<double> shoulder_levels[2];std::vector<Vec> elbow_levels,base_vectors;
@@ -1143,7 +1153,9 @@ Settings load_settings(const Json& plan) {
         const auto layout=cfg.value("proximal_layout",std::string{"grid_5x5x2"});
         if(layout!="grid_5x5x2" && layout!="adaptive_coverage")
             throw std::runtime_error("unknown proximal layout");
-        if(layout=="grid_5x5x2" &&
+        if(validation && layout!="adaptive_coverage")
+            throw std::runtime_error("short validation requires adaptive coverage layout");
+        if(!validation && layout=="grid_5x5x2" &&
            (shoulder_levels[0].size()!=5 || shoulder_levels[1].size()!=5 || elbow_levels.size()!=2))
             throw std::runtime_error("proximal plan must contain a complete 5x5x2 grid");
         for(const auto& pose:plan.at("poses")) {
@@ -1151,13 +1163,14 @@ Settings load_settings(const Json& plan) {
                 throw std::runtime_error("invalid planned baseline transit");
         }
         const double required=cfg.at("minimum_proximal_actual_span_rad").get<double>()+2*s.capture_error;
-        for(int i=0;i<2;++i) {
+        for(int i=0;!validation && i<2;++i) {
             const auto bounds=std::minmax_element(shoulder_levels[i].begin(),shoulder_levels[i].end());
             if(*bounds.second-*bounds.first<required-1e-9)
                 throw std::runtime_error("nominal shoulder coverage cannot guarantee requested capture-error margin");
         }
-        std::cout << "PROXIMAL COVERAGE: 50 bases, paired approaches; J1/J2 actual coverage enforced.\n"
-                     "Gains and motion speed unchanged; review planned ranges and selected alarms.\n"
+        std::cout << (validation ? "SHORT HOLD VALIDATION: 2 bases; NOT a full proximal coverage test.\n" :
+                                  "PROXIMAL COVERAGE: 50 bases, paired approaches; J1/J2 actual coverage enforced.\n")
+                  << "Gains and motion speed unchanged; review planned ranges and selected alarms.\n"
                   << "TORQUE PROFILE: " << torque_profile << "; software alarms Nm " << Json(TORQUE_ALARM).dump() << '\n';
     }
     return s;
@@ -1389,7 +1402,7 @@ int main(int argc, char** argv) {
     for (int n=1; n<argc; ++n) {
         const std::string arg=argv[n];
         if (arg=="--version") {
-            std::cout << "openarm-static-v1-multi9-opposed-vectors\n"; return 0;
+            std::cout << "openarm-static-v1-multi10-stage-holdfix\n"; return 0;
         } else if (arg=="--help") {
             std::cout << "openarm_static_torque [--diagnose] [--interface can0] [--output-root DIR]\n"
                          "openarm_static_torque --plan PLAN.json --execute [--interface can0]\n"; return 0;
@@ -1408,7 +1421,7 @@ int main(int argc, char** argv) {
     Json metadata{{"completed",false},{"mode", execute ? "static_motion" : "diagnose"},
                   {"interface",CAN_INTERFACE},{"period_s",PERIOD_S},
                   {"torque_source","motor reported estimate; not a calibrated external torque sensor"},
-                  {"software_version","openarm-static-v1-multi9-opposed-vectors"},
+                  {"software_version","openarm-static-v1-multi10-stage-holdfix"},
                   {"sampling_schema","continuous-window-v1"}};
     try {
         if (output_root.empty()) {
@@ -1457,6 +1470,10 @@ int main(int argc, char** argv) {
         const Vec expected=vector7(plan,"baseline_q_motor_rad");
         const auto poses=plan.at("poses");
         const bool proximal=plan.at("config").value("experiment_scope",std::string{})=="proximal_grid_50";
+        const bool validation=proximal && plan.at("config").value("validation_only",false);
+        const int expected_bases=validation ? 2 : 50;
+        metadata["validation_only"]=validation;
+        metadata["full_proximal_coverage_complete"]=false;
         if (!poses.is_array() || poses.empty() || poses.size()>(proximal ? 300u : 100u))
             throw std::runtime_error("prepared acquisition count exceeds profile limit");
         for (const auto& pose : poses) {
@@ -1493,7 +1510,7 @@ int main(int argc, char** argv) {
             const Vec target=vector7(pose,"q_motor_rad");
             Vec pre_actual{};
             if(proximal) {
-                Settings staging=settings;staging.position_error=settings.capture_error;
+                Settings staging=settings;staging.position_error=settings.approach_error;
                 if(pose.value("via_start",false)) {
                     move_static(arm,current,expected,settings,log,cycle,name+"_via_start");
                     hold_static(arm,current,expected,staging,log,cycle,name+"_via_start",false);
@@ -1540,7 +1557,7 @@ int main(int argc, char** argv) {
                 metadata["valid_distinct_pose_count"]=distinct_measured_poses.size();
                 metadata["valid_acquisition_count"]=proximal_acquisitions;
                 write_json(run_dir/"metadata.json",metadata);
-                std::cout << "Verified base " << distinct_measured_poses.size() << "/50; directional acquisition "
+                std::cout << "Verified base " << distinct_measured_poses.size() << '/' << expected_bases << "; directional acquisition "
                           << proximal_acquisitions << '/' << poses.size() << '\n';
             }
             if(verify_50) {
@@ -1593,9 +1610,10 @@ int main(int argc, char** argv) {
             for(int i=0;i<N;++i) span[i]=high[i]-low[i];
             metadata["proximal_measured_span_rad"]=span;
             const double minimum=plan.at("config").at("minimum_proximal_actual_span_rad").get<double>();
-            if(distinct_measured_poses.size()!=50 || proximal_acquisitions!=plan.at("config").at("requested_acquisition_count").get<int>() ||
-               span[0]<minimum || span[1]<minimum)
+            if(distinct_measured_poses.size()!=size_t(expected_bases) || proximal_acquisitions!=plan.at("config").at("requested_acquisition_count").get<int>() ||
+               (!validation && (span[0]<minimum || span[1]<minimum)))
                 throw std::runtime_error("actual J1/J2 coverage insufficient; cannot declare proximal acquisition complete");
+            metadata["full_proximal_coverage_complete"]=!validation;
         }
         move_static(arm,current,fresh.q,settings,log,cycle,"return_start");
         hold_static(arm,current,fresh.q,settings,log,cycle,"return_start",false);

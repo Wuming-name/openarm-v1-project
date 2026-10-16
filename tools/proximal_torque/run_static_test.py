@@ -20,7 +20,7 @@ import sys
 import time
 
 HERE = Path(__file__).resolve().parent
-VERSION = 'openarm-static-v1-multi9-opposed-vectors'
+VERSION = 'openarm-static-v1-multi10-stage-holdfix'
 
 
 def run(command):
@@ -130,6 +130,7 @@ def main(argv=None):
     parser.add_argument('--approach-deg',type=int,choices=[10,12,15],default=12)
     parser.add_argument('--repeats',type=int,choices=[1,2,3],default=1)
     parser.add_argument('--torque-profile',choices=['legacy_low','proximal_5_3'],default='legacy_low')
+    parser.add_argument('--short-test',action='store_true',help='Two-base proximal holding validation; not full 50-base coverage')
     parser.add_argument('--max-angle-deg', type=int, choices=[5,10,15,20,30])
     parser.add_argument('--previous-run', type=Path, default=Path.home() / 'experiments/torque_compare/static_1792044758710916613',
                         help='Completed pilot used for measured-movement eligibility; never used as current position')
@@ -149,6 +150,8 @@ def main(argv=None):
         parser.error('Maximum nominal proximal span must exceed required actual span by at least 9.17deg capture margin')
     if args.mode!='proximal' and args.torque_profile!='legacy_low':
         parser.error('The explicit proximal torque profile is available only in proximal mode')
+    if args.short_test and (args.mode!='proximal' or not (args.plan_only or args.execute)):
+        parser.error('--short-test requires proximal --plan-only or --execute')
     if args.inspect_run:
         if args.execute or args.setup_can or args.plan_only:
             parser.error('--inspect-run cannot be combined with execution, planning or CAN setup')
@@ -225,6 +228,7 @@ def main(argv=None):
                          '--min-proximal-span-deg',str(args.min_proximal_span_deg),
                          '--approach-deg',str(args.approach_deg),'--repeats',str(args.repeats)]
                 command+=['--torque-profile',args.torque_profile]
+                if args.short_test:command+=['--short-test']
             elif args.mode=='pose50':
                 command=[sys.executable,HERE/'prepare_static_50.py','--snapshot',diagnosis/'snapshot.json',
                          '--model',args.model.expanduser(),'--out',plan_dir,'--max-angle-deg',str(args.max_angle_deg)]

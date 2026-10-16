@@ -1,100 +1,82 @@
-OpenArm V1 右臂：自适应近端覆盖与双向力矩采集
-版本 openarm-static-v1-multi9-opposed-vectors
+OpenArm V1 右臂近端静态力矩：预接近持位修正
+版本 openarm-static-v1-multi10-stage-holdfix
 
-本次修正
-旧规划器要求完整5×5×2网格，任一角点或路径不通过，就拒绝整个网格。
-新版不再要求所有肩部位置共用两种肘部姿态。
-在每个肩部轴17级候选和更密集的J3/J4组合中搜索，覆盖优先选50个基础配置。
-修正七轴必须同号接近的额外限制：每个基础姿态可选择不同轴的正负组合，第二次全部反向。
-例如A方向为[+,-,+,-,+,+,-]，B方向就是[-,+,-,+,-,-,+]。
-每一轴仍有一正一反两次接近，偏移幅度仍12度，阈值与路径检查不变。
-最多搜索64组互为反向的方向组合，不代表任意真实路径均可行。
-方向组合先通过两侧端点筛选，再通过接近及中转路径检查；不能只凭端点通过执行。
-这是离散候选搜索，不是全空间最优规划；搜索失败不证明不存在其他可行姿态。
-没有提高任何力矩阈值、增益、速度、加速度，也没有关闭接触/限位检查。
+本版针对的问题
+在base_002_inc_r1_approach，J2已经静止，却与目标保持约5.10度偏差。
+原预接近容差0.08rad（4.58度）使连续稳定窗口一直无法开始。
+这次只将预接近以及计划中的经起点中转容差改为0.10rad（5.73度）。
+正式采样容差仍0.08rad；初始持位和正常结束返回持位仍0.04rad。
+不是删除位置检查，不是提高电机刚度，也不是提高力矩阈值。
+本版针对已记录的预接近超时；不能保证所有正式采样姿态也满足0.08rad要求。
+若其他阶段仍失败，保持停止，不自动放宽或重试。
 
-保留的要求
-50个不同基础姿态，每姿态正、反方向各采集一次，默认100次采集。
-每次正式采集需60组左右连续稳定数据。作废采样段不混入分析。
-J1和J2实际跨度都至少30度；目标跨度另加两端捕获误差余量约9.17度。
-正式目标J5-J7仍保持起点角度，预接近过程会正反移动这些轴。
-默认七轴接近偏移12度，并逐轴核验实测接近方向和幅度至少1度。
-基础目标间距恢复为控制器原有的5度；运行时实测配置仍须至少相差1度。
-5度目标间距不保证实测区别；若实测姿态重合，运行时拒绝计数并停止。
-所有目标、接近路径、转移路径和正常返回起点路径都进行名义模型检查。
-路径以最大轴间隔0.015rad离散检查，不是连续碰撞或真实机械净空证明。
-零点精度、模型质量和几何、输出轴力矩标度仍未核准。
-
-路线
-每个候选必须能从起点进入两种预接近位置，并能从目标返回起点。
-选定50个基础目标后，按邻近顺序访问，重新检查实际串联路线。
-直接转移被模型拒绝时，仅当经起点两段路径都通过，才记录via_start=true。
-C++会按计划经起点转移并保持；它不会临时搜索路线或自动故障撤退。
-coverage.json记录planned_baseline_transits和预计耗时，可能比旧版明显更长。
-预计耗时不含额外等待稳定、额外预接近保持和结束等待安装支撑的时间。
-
-控制与报警
+保留的保护与数据要求
 KP=[35,35,20,20,6,6,6]；KD=[4,4,2,2,.8,.8,.8]。
-周期50ms，目标速度上限0.05rad/s，加速度0.08rad/s²。
-跟踪报警0.16rad；正式静态位置捕获偏差0.08rad。
-初始/返回持位偏差仍为0.04rad；预接近和经起点中转持位为0.08rad。
-静态速度<=0.04rad/s，稳定窗口波动<=0.003rad，温度报警55℃。
-legacy_low：软件力矩报警[2,2,1.5,1.5,.7,.7,.7]Nm，为默认配置。
-proximal_5_3：显式选择[5,5,3,3,.7,.7,.7]Nm。
-模型重力筛选上限为所选报警的60%，不自动更换配置。
-这些软件停止阈值不是电机内部电流限制或可靠硬件力矩钳制。
-不改MIT模式、内部电流参数或零位；故障只尝试失能，未确认实际失能。
+tracking_alarm=0.16rad；目标速度0.05rad/s；加速度0.08rad/s²。
+proximal_5_3软件力矩报警=[5,5,3,3,.7,.7,.7]Nm，仍需显式指定。
+默认legacy_low仍为[2,2,1.5,1.5,.7,.7,.7]Nm。
+温度报警55℃；静态速度<=0.04rad/s；稳定窗口位置波动<=0.003rad。
+先稳定1秒，再连续采样3秒；故障和失效窗口不算有效样本。
+目标及路径仍检查名义模型的限位、接触、重力负载余量；没有跳过检查。
+七轴仍需逐轴核验实际接近方向且位移至少1度，实测基础姿态仍需有区别。
+默认12度接近偏移，比预接近0.10rad+采样0.08rad+实际方向最小1度之和更大。
+本版不接受10度接近偏移，需使用12度或15度；没有自动增大偏移。
+实际采样用每条记录的实际七轴角度计算模型，不能用目标角度代替。
+名义模型检查并不保证实体净空；零点、质量、输出轴Nm标度仍未核准。
+软件力矩报警不是电机内部电流限制或可靠硬件力矩钳制。
+
+新增两姿态短测
+--short-test：先按全实验要求筛选50个基础姿态，再只执行前2个基础姿态。
+每个姿态正反各一次，默认共4次采集；幅度沿用候选计划，并不一定是小角度。
+短测不强制两姿态的J1/J2跨度达到30度，不会被计为完成50姿态实验。
+其余路径、方向、实际姿态区别和运动保护仍保留。
+plan/config、metadata及比较报告含validation_only=true。
+比较报告中的dataset_complete=true只表示该短测数据完整；
+full_proximal_coverage_complete始终为false，不能当作全范围实验完成。
+不带--short-test的完整实验仍要求50个基础姿态和两肩实际跨度各至少30度。
 
 安装更新
-将openarm_proximal_vectors.zip复制到Ubuntu的/home/lsk目录。
+将openarm_proximal_holdfix.zip复制到Ubuntu的/home/lsk目录。
 在Ubuntu终端执行：
 cd ~/openarm_v1_ws/src/openarm-v1-project/tools/proximal_torque
-tar --exclude='./.venv' --exclude='./build' -czf "$HOME/proximal_torque_before_adaptive_$(date +%Y%m%d_%H%M%S).tar.gz" .
-python3 -m zipfile -e "$HOME/openarm_proximal_vectors.zip" .
-保留现有.venv、build和模型，不需要重新安装依赖。启动时自动重新编译。
-完整新目录首次安装才需：python3 -m venv .venv，再用.venv/bin/python -m pip install -r requirements.txt。
+tar --exclude='./.venv' --exclude='./build' -czf "$HOME/proximal_before_holdfix_$(date +%Y%m%d_%H%M%S).tar.gz" .
+python3 -m zipfile -e "$HOME/openarm_proximal_holdfix.zip" .
+保留原.venv、build、模型和实验数据；不需要重新安装依赖。
+统一入口会自动编译并检查新二进制版本，不能只替换单个Python或C++文件。
+本包没有替换任何机械臂模型文件，仍使用Ubuntu工程已有模型。
 
-本次先只规划，不使能、不运动
-.venv/bin/python -u run_proximal.py --plan-only --torque-profile proximal_5_3 --max-proximal-span-deg 90 --min-proximal-span-deg 30 --approach-deg 12 --repeats 1
-要求can0已配置为1M/5M CAN-FD；需要重设CAN时另加--setup-can。
-初始电机应失能且有稳定支撑；关闭其他控制和查询程序。
-90度是候选最大总跨度，不是正负90度，也不保证选出90度覆盖。
-检查prepared/base_poses_50.csv和coverage.json中的绝对角度、预计耗时和模型力矩。
-若失败，prepared/planning_rejection.json记录端点可行范围、已选路径可行范围和拒绝原因。
-新版单独记录target_only_pass_count、all_same_sign_endpoint_pass_count、feasible_endpoint_count。
-stage_rejections将目标、接近端点、接近路径及返回路径的拒绝分开。
-endpoint_only_shoulder_spans_deg仅是端点范围，不能当成路径可行范围。
-不会因失败而自动缩小最低跨度、提高报警或关闭接触检查。
+短测只规划，不使能
+.venv/bin/python -u run_proximal.py --plan-only --short-test --torque-profile proximal_5_3
+需要重新配置can0时再加--setup-can；接口须是1M/5M CAN-FD。
 
-后续执行方式（只规划结果和实体路径审阅后再使用）
-相同入口将--plan-only替换为--execute，保留其余参数。
-会重新读取当前位置并重新规划，执行计划可能不同；输入RUN_STATIC前再次检查。
-全路径需覆盖防坠和失电情况；测量时不得有承重支撑接触。
-正常结束返回起点保持，安装好支撑后输入SUPPORTED。
-发生故障没有自动重试，失能只是尽力发送，需检查实际电机状态。
+执行两姿态短测
+.venv/bin/python -u run_proximal.py --execute --short-test --torque-profile proximal_5_3
+关闭其他CAN控制和查询工具，初始电机失能并有支撑，保持全程防坠覆盖。
+重新读取当前位置和规划，检查新计划范围、实体净空和防坠后，输入RUN_STATIC。
+测量姿态不要与承重支撑接触。结束返回起点保持，安装支撑后输入SUPPORTED。
+软件只尽力发送失能，未确认真实失能；停止后需确认真实电机状态和支撑。
 
-文件和结果
-run_proximal.py：统一入口；run_static_test.py：编译、读取、规划和分析编排。
-prepare_proximal_50.py：自适应规划、端点/路径筛选和路线保存。
-openarm_static_torque.cpp：CAN控制、预接近和中转、稳定采样、实际覆盖验收。
-torque_model.py：MuJoCo模型检查与按每个实际角度计算重力对比。
-analyze_proximal_pairs.py：相同基础目标的方向配对与共同/方向相关残差。
-其余prepare_*是公共依赖，不需逐个运行。
-结果目录：~/experiments/torque_compare/session_日期_时间_唯一编号/
-prepared/plan.json保存本次完整路线，prepared/coverage.json保存候选和规划范围。
-base_poses_50.csv和acquisitions.csv新增每轴方向，后者还包含预接近角度和经起点中转标记。
-pose_id中的inc/dec表示A/B方向组合；对单个关节不一定对应角度正向/负向。
-paired_directions.csv按每个关节的方向重新排列，inc_pose_id才是该关节正向接近的数据。
-static_*/samples.csv保存原始数据，metadata.json保存接受窗口、实际跨度和故障信息。
-static_*/comparison/包含poses_actual.csv、summary.csv、report.json及paired_directions.csv。
-若两方向实测七轴角度差超过0.5度，angles_matched=false，不把均值当同姿态重力。
-残差分解只是诊断，不是已经辨识出的摩擦系数或标定力矩。
+完整实验（短测成功并审阅后，再单独启动）
+.venv/bin/python -u run_proximal.py --execute --torque-profile proximal_5_3 --max-proximal-span-deg 90 --min-proximal-span-deg 30 --approach-deg 12 --repeats 1
+会重新规划，不复用短测起点或路线。不是自动从短测接着运行完整实验。
+可能需要40分钟以上，以本次规划预计耗时为准。
 
-验证范围
-新增7项自适应规划离线测试，覆盖肩肘耦合、混合方向、跨度不足、路径接触、中转和路线检查。
-17项近端/配对测试、13项编排测试、17项采样隔离/模型比较测试通过，共54项。
-另用本地XML质量与运动学做独立重力计算，在给出的近似起点复现旧同号端点筛选失败。
-独立计算不包含接触检查，也不等于在Ubuntu的真实MuJoCo中验证了完整计划。
-单元测试模型使用模拟替身。
-本地未编译Linux C++或实机执行；Ubuntu启动时编译并检查二进制版本。
-新姿态和经起点路径尚未经实机验证。不能保证当前模型和阈值一定允许所需覆盖。
+结果与程序
+run_proximal.py和run_static_test.py：统一入口、编译、读取、规划、执行和比较。
+prepare_proximal_50.py：自适应肩肘候选与混合方向组合，所有路径检查和短测前缀。
+openarm_static_torque.cpp：CAN控制、分阶段持位容差、稳定窗口、实测方向与覆盖核验。
+torque_model.py：配置验证、按实际角度计算模型、短测与全量数据验收。
+analyze_proximal_pairs.py：逐关节重排正反数据，保留短测标识。
+其余prepare_*为公共依赖，不需手动分别运行。
+结果仍在~/experiments/torque_compare/session_日期_时间_唯一编号/。
+prepared/config_proximal.json、plan.json保存本次容差和短测标识。
+static_*/samples.csv保存全过程；metadata.json保存接受窗口和故障。
+static_*/comparison/包含summary.csv、poses_actual.csv、report.json及正反配对报告。
+
+验证与限制
+用已提供的失败数据回放：预接近位置可落在0.10rad内，并存在满足原速度/波动/时序条件的连续稳定窗口。
+正式采样0.08rad保持，旧故障帧不会被误当作正式采样通过。
+61项相关离线测试通过，包括短测计数、方向、数据完整性、参数上界和原始记录回放。
+回放不能代替实机验证；新条件下实际摩擦状态及后续运动响应可能不同。
+本地没有Linux编译器，C++修改未本地编译或实机运行；Ubuntu入口先编译再访问CAN。
+不自动调增益、不自动增加力矩限制、不自动重试。

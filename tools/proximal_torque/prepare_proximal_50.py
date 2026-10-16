@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Offline adaptive shoulder coverage with paired, explicitly checked paths."""
 import argparse
+import copy
 from collections import Counter
 import csv
 import itertools
@@ -43,6 +44,7 @@ def make_config(template,path,q,low,high,min_span,approach,repeats,torque_profil
                approach_offset_rad=[math.radians(approach)]*7,
                minimum_proximal_actual_span_rad=math.radians(min_span),
                minimum_actual_approach_rad=math.radians(1),
+               approach_position_error_rad=.10,
                repetitions=repeats,requested_acquisition_count=100*repeats)
     if torque_profile not in ('legacy_low','proximal_5_3'):
         raise ValueError('Unknown torque profile')
@@ -343,6 +345,25 @@ def save_plan(model,cfg,model_path,snapshot,q,bases,samples,coverage,out,mujoco)
     return duration/60
 
 
+def short_validation(cfg,bases,samples,coverage,model):
+    """Keep the first two complete directional pairs, never claim 50-base coverage."""
+    original_coverage=copy.deepcopy(coverage)
+    cfg.update(validation_only=True,requested_pose_count=2,requested_acquisition_count=4*cfg['repetitions'])
+    tm.validate_config(cfg)
+    chosen=bases[:2];ids={b['base_pose_id'] for b in chosen}
+    rows=[p for p in samples if p['base_pose_id'] in ids]
+    if len(chosen)!=2 or len(rows)!=4*cfg['repetitions']:raise ValueError('Incomplete two-base validation prefix')
+    g=[model.check_point(b['q_motor_rad'],cfg) for b in chosen]
+    result={'validation_only':True,'full_search_coverage':original_coverage,
+            'nominal_ranges_deg':[[math.degrees(min(b['q_motor_rad'][i] for b in chosen)),
+                                  math.degrees(max(b['q_motor_rad'][i] for b in chosen))] for i in range(7)],
+            'model_gravity_ranges_nm':[[min(x[i] for x in g),max(x[i] for x in g)] for i in range(7)],
+            'planned_baseline_transits':sum(bool(r.get('via_start')) for r in rows),
+            'minimum_actual_shoulder_span_enforced':False}
+    for i in (0,1):result[f'nominal_j{i+1}_span_deg']=result['nominal_ranges_deg'][i][1]-result['nominal_ranges_deg'][i][0]
+    return chosen,rows,result
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--snapshot',required=True)
@@ -353,6 +374,7 @@ def main():
     parser.add_argument('--approach-deg',type=int,choices=[10,12,15],default=12)
     parser.add_argument('--repeats',type=int,choices=[1,2,3],default=1)
     parser.add_argument('--torque-profile',choices=['legacy_low','proximal_5_3'],default='legacy_low')
+    parser.add_argument('--short-test',action='store_true',help='Two-base holding validation; not a full coverage experiment')
     args=parser.parse_args()
     try:
         snap,_,q=pp.fresh_snapshot(args.snapshot,Path.home()/'experiments/torque_compare')
@@ -367,9 +389,12 @@ def main():
                         args.min_proximal_span_deg,args.approach_deg,args.repeats,args.torque_profile)
         print('Explicit torque profile:',cfg['torque_profile'],'software alarms Nm:',cfg['torque_alarm_nm'],flush=True)
         bases,samples,coverage=select_adaptive(tm.Model(cfg,path),cfg,q,args.max_proximal_span_deg,progress=True)
+        if args.short_test:
+            bases,samples,coverage=short_validation(cfg,bases,samples,coverage,tm.Model(cfg,path))
         duration=save_plan(tm.Model(cfg,path),cfg,path,snap,q,bases,samples,coverage,args.out.expanduser().resolve(),mujoco)
         print('J1/J2 nominal spans:',coverage['nominal_j1_span_deg'],coverage['nominal_j2_span_deg'],'deg',flush=True)
-        print(f'50 bases; {len(samples)} directional acquisitions. Approximate {duration:.1f} minutes + extra settling/end hold.',flush=True)
+        print(f'{len(bases)} bases; {len(samples)} directional acquisitions. Approximate {duration:.1f} minutes + extra settling/end hold.',flush=True)
+        if args.short_test:print('SHORT HOLD VALIDATION ONLY: full 50-base shoulder coverage is NOT tested.',flush=True)
         print('Review:',args.out/'base_poses_50.csv',args.out/'coverage.json',flush=True)
         return 0
     except (ValueError,KeyError,OSError,TypeError,ImportError) as exc:

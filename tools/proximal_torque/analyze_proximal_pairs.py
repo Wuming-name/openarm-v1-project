@@ -68,6 +68,8 @@ def main():
                           'residual_even_rmse_nm':math.sqrt(statistics.fmean(r['residual_even_nm']**2 for r in joint)),
                           'residual_odd_mean_nm':statistics.fmean(r['residual_odd_nm'] for r in joint)})
         tm.save_json(out/'paired_report.json',{'joint_summary':stats,'angle_match_threshold_deg':.5,
+                     'validation_only':report.get('validation_only',False),
+                     'full_proximal_coverage_complete':report.get('full_proximal_coverage_complete',False),
                      'actual_proximal_span_deg':report['proximal_measured_span_deg'],
                      'interpretation':'Even/odd residual components are diagnostics using model gravity at EACH actual configuration. '
                                       'Motor mean is not certified gravity. Unmatched angles, friction asymmetry and torque scaling prevent direct calibration.'})
