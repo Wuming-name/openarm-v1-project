@@ -940,6 +940,7 @@ struct Settings {
     bool actual_static_measurement = false;
     double capture_error = .08;
     double approach_error = .08;
+    double return_error = .04;
 };
 Settings load_settings(const Json& plan) {
     if (plan.at("schema") != "openarm-static-v1" || !plan.at("model_path_checked").get<bool>())
@@ -976,6 +977,7 @@ Settings load_settings(const Json& plan) {
     s.dwell = bounded(cfg, "sample_seconds", 1, 15);
     s.startup_tolerance = bounded(cfg, "startup_tolerance_rad", 0.0005, 0.01);
     s.position_error = bounded(cfg, "settle_position_error_rad", 0.001, TRACK_ALARM);
+    s.return_error=s.position_error;
     s.still_speed = bounded(cfg, "settle_speed_rad_s", 0.001, 0.04);
     s.position_spread = bounded(cfg, "settle_spread_rad", 0.0005, 0.01);
     s.stable_seconds = bounded(cfg, "stable_seconds", 0.5, 3);
@@ -1077,6 +1079,8 @@ Settings load_settings(const Json& plan) {
         s.capture_error=bounded(cfg,"static_capture_error_rad",.04,std::min(.08,TRACK_ALARM));
         s.approach_error=cfg.contains("approach_position_error_rad") ?
             bounded(cfg,"approach_position_error_rad",.08,std::min(.10,TRACK_ALARM-.04)) : s.capture_error;
+        s.return_error=cfg.contains("return_position_error_rad") ?
+            bounded(cfg,"return_position_error_rad",.04,std::min(.08,TRACK_ALARM/2)) : s.position_error;
         if(cfg.contains("approach_position_error_rad")) {
             const double minimum=cfg.at("minimum_actual_approach_rad").get<double>();
             for(double x:offset) if(x<s.approach_error+s.capture_error+minimum)
@@ -1402,7 +1406,7 @@ int main(int argc, char** argv) {
     for (int n=1; n<argc; ++n) {
         const std::string arg=argv[n];
         if (arg=="--version") {
-            std::cout << "openarm-static-v1-multi10-stage-holdfix\n"; return 0;
+            std::cout << "openarm-static-v1-multi11-return-holdfix\n"; return 0;
         } else if (arg=="--help") {
             std::cout << "openarm_static_torque [--diagnose] [--interface can0] [--output-root DIR]\n"
                          "openarm_static_torque --plan PLAN.json --execute [--interface can0]\n"; return 0;
@@ -1421,8 +1425,11 @@ int main(int argc, char** argv) {
     Json metadata{{"completed",false},{"mode", execute ? "static_motion" : "diagnose"},
                   {"interface",CAN_INTERFACE},{"period_s",PERIOD_S},
                   {"torque_source","motor reported estimate; not a calibrated external torque sensor"},
-                  {"software_version","openarm-static-v1-multi10-stage-holdfix"},
+                  {"software_version","openarm-static-v1-multi11-return-holdfix"},
                   {"sampling_schema","continuous-window-v1"}};
+    metadata["acquisition_completed"]=false;
+    metadata["return_completed"]=false;
+    metadata["supported_exit_confirmed"]=false;
     try {
         if (output_root.empty()) {
             const char* home=std::getenv("HOME");
@@ -1615,9 +1622,17 @@ int main(int argc, char** argv) {
                 throw std::runtime_error("actual J1/J2 coverage insufficient; cannot declare proximal acquisition complete");
             metadata["full_proximal_coverage_complete"]=!validation;
         }
+        metadata["acquisition_completed"]=true;
+        write_json(run_dir/"metadata.json",metadata);
         move_static(arm,current,fresh.q,settings,log,cycle,"return_start");
-        hold_static(arm,current,fresh.q,settings,log,cycle,"return_start",false);
-        std::cout << "Acquisition finished; HOLDING start pose. Install support then type SUPPORTED + Enter.\n";
+        Settings returning=settings;returning.position_error=settings.return_error;
+        hold_static(arm,current,fresh.q,returning,log,cycle,"return_start",false);
+        metadata["return_completed"]=true;
+        Vec return_error{};for(int i=0;i<N;++i) return_error[i]=current.q[i]-fresh.q[i];
+        metadata["return_actual_error_rad"]=return_error;
+        metadata["return_position_limit_rad"]=settings.return_error;
+        write_json(run_dir/"metadata.json",metadata);
+        std::cout << "Acquisition finished; HOLDING near start pose (within configured return tolerance). Install support then type SUPPORTED + Enter.\n";
         std::string stop_line;
         while (true) {
             pollfd stdin_fd{STDIN_FILENO,POLLIN,0};
@@ -1642,6 +1657,7 @@ int main(int argc, char** argv) {
             if(!current.sample_valid) throw std::runtime_error("end hold feedback timing invalid");
             cycle.finish(arm);
         }
+        metadata["supported_exit_confirmed"]=true;
         metadata["completed"]=true; metadata["stop_reason"]="supported_normal_exit";
         metadata["accepted_sample_windows"]=accepted_sample_windows;
         metadata["sample_window_rejections"]=sample_window_rejections;

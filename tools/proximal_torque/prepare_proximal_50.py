@@ -45,6 +45,7 @@ def make_config(template,path,q,low,high,min_span,approach,repeats,torque_profil
                minimum_proximal_actual_span_rad=math.radians(min_span),
                minimum_actual_approach_rad=math.radians(1),
                approach_position_error_rad=.10,
+               return_position_error_rad=.08,
                repetitions=repeats,requested_acquisition_count=100*repeats)
     if torque_profile not in ('legacy_low','proximal_5_3'):
         raise ValueError('Unknown torque profile')

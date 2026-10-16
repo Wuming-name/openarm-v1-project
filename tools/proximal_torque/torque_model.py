@@ -150,6 +150,8 @@ def validate_config(cfg):
             raise ValueError('Settings exceed legacy static-collection profile')
         if proximal:
             base_count=proximal_base_count(cfg)
+            if 'return_position_error_rad' in cfg:
+                number(cfg,'return_position_error_rad',.04,min(.08,cfg['tracking_alarm_rad']/2))
             if 'approach_position_error_rad' in cfg:
                 approach_error=number(cfg,'approach_position_error_rad',.08,min(.10,cfg['tracking_alarm_rad']-.04))
                 if any(x<approach_error+cfg['static_capture_error_rad']+cfg['minimum_actual_approach_rad'] for x in cfg['approach_offset_rad']):
@@ -466,7 +468,10 @@ def compare(args):
                     writer.writerow([pose['pose_id']]+[math.degrees(s['q_mean_rad']) for s in rows]+
                                     [s['feedback_mean_nm'] for s in rows]+[s['gravity_mean_nm'] for s in rows]+
                                     [s['residual_mean_nm'] for s in rows])
-    report={"accepted_rounds":accepted,"rejected_rounds":rejected,"acquisition_completed":meta["completed"],
+    report={"accepted_rounds":accepted,"rejected_rounds":rejected,
+            "acquisition_completed":meta.get('acquisition_completed',meta['completed']),
+            "run_completed":meta['completed'],"return_completed":meta.get('return_completed'),
+            "supported_exit_confirmed":meta.get('supported_exit_confirmed'),
             "validation_only":cfg.get('validation_only',False),
             "full_proximal_coverage_complete":bool(complete and cfg.get('experiment_scope')==PROXIMAL_SCOPE and not cfg.get('validation_only',False)),
             "dataset_complete":complete,"frozen_model_sha256":sha256(frozen),

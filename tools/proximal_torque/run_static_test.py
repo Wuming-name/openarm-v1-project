@@ -20,7 +20,7 @@ import sys
 import time
 
 HERE = Path(__file__).resolve().parent
-VERSION = 'openarm-static-v1-multi10-stage-holdfix'
+VERSION = 'openarm-static-v1-multi11-return-holdfix'
 
 
 def run(command):
@@ -95,6 +95,10 @@ def summarize(run_dir, meta):
     from torque_model import row_in_accepted_window
     print('\nResult directory:', run_dir, flush=True)
     print('Completed:', meta.get('completed'), 'Error:', meta.get('error', 'none'), flush=True)
+    if 'acquisition_completed' in meta:
+        print('Acquisition completed:',meta['acquisition_completed'],
+              'Return completed:',meta.get('return_completed'),
+              'SUPPORTED received:',meta.get('supported_exit_confirmed'),flush=True)
     samples_path = run_dir / 'samples.csv'
     if samples_path.exists():
         with samples_path.open(encoding='utf-8', newline='') as stream:
