@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.16)
+project(openarm_dynamic LANGUAGES CXX)
+find_package(nlohmann_json 3.2 REQUIRED)
+find_package(Threads REQUIRED)
+add_executable(openarm_dynamic openarm_dynamic.cpp)
+target_compile_features(openarm_dynamic PRIVATE cxx_std_17)
+target_compile_options(openarm_dynamic PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(openarm_dynamic PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
