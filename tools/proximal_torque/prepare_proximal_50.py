@@ -206,6 +206,12 @@ def select_adaptive(model,cfg,q,max_span,progress=False):
             attempts+=1;target=list(mode);target[0]=a;target[1]=b
             try:
                 checked.point(target)
+                if cfg.get('trim_j2',False):
+                    # Reference corridor screening is nominal, not a physical
+                    # clearance proof. Runtime also checks actual feedback.
+                    for sign in (-1,1):
+                        end=list(target);end[1]+=sign*.10
+                        checked.path(target,end)
             except ValueError as exc:
                 stage_rejections['target: '+str(exc)]+=1;continue
             target_count+=1
@@ -395,6 +401,7 @@ def main():
     parser.add_argument('--repeats',type=int,choices=[1,2,3],default=1)
     parser.add_argument('--torque-profile',choices=['legacy_low','proximal_5_3'],default='legacy_low')
     parser.add_argument('--short-test',action='store_true',help='Two-base holding validation; not a full coverage experiment')
+    parser.add_argument('--trim-j2',action='store_true')
     parser.add_argument('--min-j4-span-deg',type=int,choices=[0,20,30,40,50,60],default=0,
                         help='Minimum NOMINAL target span; does not enlarge joint limits')
     parser.add_argument('--min-j3-model-span-nm',type=float,choices=[0,.2,.3,.4,.5,.6],default=0,
@@ -414,6 +421,10 @@ def main():
         print('Explicit torque profile:',cfg['torque_profile'],'software alarms Nm:',cfg['torque_alarm_nm'],flush=True)
         cfg['minimum_j4_nominal_span_deg']=args.min_j4_span_deg
         cfg['minimum_j3_model_span_nm']=args.min_j3_model_span_nm
+        cfg['trim_j2']=args.trim_j2
+        if args.trim_j2:
+            cfg['trim_j2_protocol']='bounded-j2-v1'
+            print('J2 bounded trim: max reference offset 0.10rad; sample target error <=0.003rad; no gain/torque increase.',flush=True)
         bases,samples,coverage=select_adaptive(tm.Model(cfg,path),cfg,q,args.max_proximal_span_deg,progress=True)
         print('Full-plan J4 nominal span:',coverage['nominal_j4_span_deg'],'deg; J3 model gravity span:',
               coverage['model_j3_span_nm'],'Nm. Predicted coverage, not measured coverage.',flush=True)
@@ -422,6 +433,8 @@ def main():
         duration=save_plan(tm.Model(cfg,path),cfg,path,snap,q,bases,samples,coverage,args.out.expanduser().resolve(),mujoco)
         print('J1/J2 nominal spans:',coverage['nominal_j1_span_deg'],coverage['nominal_j2_span_deg'],'deg',flush=True)
         print(f'{len(bases)} bases; {len(samples)} directional acquisitions. Approximate {duration:.1f} minutes + extra settling/end hold.',flush=True)
+        if args.trim_j2:
+            print('Estimate excludes J2 trim: each acquisition can add up to about 90s correction plus 38s reference release; faults stop the run.',flush=True)
         if args.short_test:print('SHORT HOLD VALIDATION ONLY: full 50-base shoulder coverage is NOT tested.',flush=True)
         print('Review:',args.out/'base_poses_50.csv',args.out/'coverage.json',flush=True)
         return 0

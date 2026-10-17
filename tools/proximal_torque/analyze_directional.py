@@ -42,6 +42,10 @@ def direction_stats(rows):
 def write_analysis(rows,out,cfg=None,validation_only=False):
     out=Path(out);cfg=cfg or {}
     stats=direction_stats(rows)
+    for row in stats:
+        row['reference_trim_enabled']=bool(cfg.get('trim_j2',False))
+        if cfg.get('trim_j2',False):
+            row['interpretation']='J2 trim enabled; nominal approach groups, not pure directional friction identification'
     with (out/'directional_metrics.csv').open('w',encoding='utf-8-sig',newline='') as f:
         writer=csv.DictWriter(f,fieldnames=list(stats[0]));writer.writeheader();writer.writerows(stats)
     joints={}
@@ -54,6 +58,7 @@ def write_analysis(rows,out,cfg=None,validation_only=False):
                        'model_at_actual_pose_span_nm':max(g)-min(g),
                        'max_own_joint_pair_mismatch_deg':max(abs(float(r['q_inc_deg'])-float(r['q_dec_deg'])) for r in rr)}
     report={'validation_only':validation_only,'joint_coverage':joints,
+            'reference_trim_enabled':bool(cfg.get('trim_j2',False)),
             'requested_nominal_j4_span_deg':cfg.get('minimum_j4_nominal_span_deg'),
             'requested_nominal_j3_model_span_nm':cfg.get('minimum_j3_model_span_nm'),
             'matched_pair_rows':sum(str(r['angles_matched']).lower()=='true' for r in rows),

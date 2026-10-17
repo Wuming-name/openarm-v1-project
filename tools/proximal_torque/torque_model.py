@@ -67,6 +67,9 @@ def validate_config(cfg):
     pilot=cfg.get("experiment_scope") in LOCAL_SCOPES
     proximal=cfg.get('experiment_scope')==PROXIMAL_SCOPE
     legacy=cfg.get('experiment_scope') in (LEGACY_SCOPE,PROXIMAL_SCOPE)
+    if type(cfg.get('trim_j2',False)) is not bool:raise ValueError('trim_j2 must be boolean')
+    if cfg.get('trim_j2',False) and (not proximal or cfg.get('trim_j2_protocol')!='bounded-j2-v1'):
+        raise ValueError('Invalid J2 trim protocol/scope')
     policy=cfg.get('measurement_position_policy','target_tracking')
     if policy not in ('target_tracking','actual_static') or (policy=='actual_static' and not legacy):
         raise ValueError('Actual-static measurement is only supported by the explicit 50-pose profile')
@@ -294,10 +297,17 @@ def row_in_accepted_window(row,meta):
             str(row.get('sample_segment',''))==str(segment))
 
 
-def within_capture_bound(row,cfg):
+def within_capture_bound(row,cfg,target=None):
     if cfg.get('measurement_position_policy','target_tracking')!='actual_static':
         return True
     try:
+        if cfg.get('trim_j2',False):
+            if target is None:return False
+            return all(math.isfinite(float(row[f'q{i}'])) and
+                       math.isfinite(float(row[f'goal{i}'])) and
+                       abs(float(row[f'goal{i}'])-target[i-1])<1e-8 and
+                       abs(float(row[f'q{i}'])-target[i-1])<=(.003 if i==2 else cfg['static_capture_error_rad'])
+                       for i in range(1,8))
         return all(math.isfinite(float(row[f'cmd{i}'])) and
                    abs(float(row[f'q{i}'])-float(row[f'cmd{i}']))<=cfg['static_capture_error_rad']
                    for i in range(1,8))
@@ -375,6 +385,7 @@ def compare(args):
     meta=read_json(run/"metadata.json")
     if meta["mode"]!="static_motion": raise ValueError("diagnostic rows are not loaded holding-torque measurements")
     plan=meta["plan"]; cfg=plan["config"]
+    pose_targets={p['pose_id']:p['q_motor_rad'] for p in plan['poses']}
     validate_config(cfg)
     frozen=run/"model.mjb"
     if sha256(frozen)!=plan["frozen_model_sha256"]: raise ValueError("frozen model changed; refusing mismatched comparison")
@@ -407,7 +418,7 @@ def compare(args):
                               abs(tau[i])<=cfg["torque_alarm_nm"][i] and
                               float(row[f"mos{i+1}"])<cfg["temperature_alarm_c"] and
                               float(row[f"coil{i+1}"])<cfg["temperature_alarm_c"] for i in range(7))
-            if not good or not within_capture_bound(row,cfg): rejected+=1; continue
+            if not good or not within_capture_bound(row,cfg,pose_targets.get(row['pose_id'])): rejected+=1; continue
             gravity,passive,contacts=model.evaluate(q)
             if contacts or not all(math.isfinite(x) for x in gravity+passive) or any(abs(x)>1e-4 for x in passive):
                 rejected+=1; continue
@@ -469,6 +480,7 @@ def compare(args):
                                     [s['feedback_mean_nm'] for s in rows]+[s['gravity_mean_nm'] for s in rows]+
                                     [s['residual_mean_nm'] for s in rows])
     report={"accepted_rounds":accepted,"rejected_rounds":rejected,
+            "reference_trim_enabled":cfg.get('trim_j2',False),
             "acquisition_completed":meta.get('acquisition_completed',meta['completed']),
             "run_completed":meta['completed'],"return_completed":meta.get('return_completed'),
             "supported_exit_confirmed":meta.get('supported_exit_confirmed'),

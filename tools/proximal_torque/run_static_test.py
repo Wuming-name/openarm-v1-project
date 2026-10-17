@@ -20,7 +20,7 @@ import sys
 import time
 
 HERE = Path(__file__).resolve().parent
-VERSION = 'openarm-static-v1-multi11-return-holdfix'
+VERSION = 'openarm-static-v1-multi12-j2-trim'
 
 
 def run(command):
@@ -137,6 +137,7 @@ def main(argv=None):
     parser.add_argument('--short-test',action='store_true',help='Two-base proximal holding validation; not full 50-base coverage')
     parser.add_argument('--min-j4-span-deg',type=int,choices=[0,20,30,40,50,60],default=0)
     parser.add_argument('--min-j3-model-span-nm',type=float,choices=[0,.2,.3,.4,.5,.6],default=0)
+    parser.add_argument('--trim-j2',action='store_true',help='Bounded J2 reference correction before sampling')
     parser.add_argument('--max-angle-deg', type=int, choices=[5,10,15,20,30])
     parser.add_argument('--previous-run', type=Path, default=Path.home() / 'experiments/torque_compare/static_1792044758710916613',
                         help='Completed pilot used for measured-movement eligibility; never used as current position')
@@ -237,6 +238,7 @@ def main(argv=None):
                 command+=['--min-j4-span-deg',str(args.min_j4_span_deg),
                           '--min-j3-model-span-nm',str(args.min_j3_model_span_nm)]
                 if args.short_test:command+=['--short-test']
+                if args.trim_j2:command+=['--trim-j2']
             elif args.mode=='pose50':
                 command=[sys.executable,HERE/'prepare_static_50.py','--snapshot',diagnosis/'snapshot.json',
                          '--model',args.model.expanduser(),'--out',plan_dir,'--max-angle-deg',str(args.max_angle_deg)]

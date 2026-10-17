@@ -76,6 +76,8 @@ def main():
                                       'Motor mean is not certified gravity. Unmatched angles, friction asymmetry and torque scaling prevent direct calibration.'})
         print('Paired diagnostics:',out/'paired_directions.csv',flush=True)
         write_analysis(rows,out,plan['config'],report.get('validation_only',False))
+        if plan['config'].get('trim_j2',False):
+            print('J2 trim changes approach history: directional results are protocol groups, not pure friction identification.')
         return 0
     except (ValueError,KeyError,OSError,TypeError) as exc:
         parser.exit(1,f'ERROR: {exc}\n')

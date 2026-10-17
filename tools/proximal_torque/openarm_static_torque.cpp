@@ -941,6 +941,7 @@ struct Settings {
     double capture_error = .08;
     double approach_error = .08;
     double return_error = .04;
+    bool trim_j2 = false;
 };
 Settings load_settings(const Json& plan) {
     if (plan.at("schema") != "openarm-static-v1" || !plan.at("model_path_checked").get<bool>())
@@ -970,6 +971,9 @@ Settings load_settings(const Json& plan) {
             throw std::runtime_error("invalid safety settings for J" + std::to_string(i+1));
     }
     Settings s;
+    s.trim_j2=cfg.value("trim_j2",false);
+    if(s.trim_j2 && (!proximal || cfg.value("trim_j2_protocol",std::string{})!="bounded-j2-v1"))
+        throw std::runtime_error("Unsupported J2 trim protocol/scope");
     s.speed = bounded(cfg, "transit_speed_rad_s", 0.001, 0.05);
     s.accel = bounded(cfg, "transit_accel_rad_s2", 0.001, 0.1);
     s.max_temp = bounded(cfg, "temperature_alarm_c", 25, 70);
@@ -1181,6 +1185,7 @@ Settings load_settings(const Json& plan) {
 }
 Json last_safety_fault;
 Json accepted_sample_windows=Json::object();
+Json trim_records=Json::object();
 Json last_quality_event;
 Json sample_window_rejections=Json::array();
 std::string safety_phase="startup", safety_pose="startup";
@@ -1250,16 +1255,20 @@ public:
         out_ << std::setprecision(12) << "time_s,stage,pose_id,stable,transaction_ms,rx_skew_ms,max_kernel_age_ms,cycle_gap_ms";
         for (const auto& prefix : {"q", "dq", "tau", "cmd", "rx", "status", "mos", "coil"})
             for (int i = 1; i <= N; ++i) out_ << ',' << prefix << i;
-        out_ << ",sample_segment\n"; out_.flush();
+        out_ << ",sample_segment";
+        for(int i=1;i<=N;++i) out_ << ",goal" << i;
+        out_ << '\n'; out_.flush();
     }
     void row(const State& s, const std::string& stage, const std::string& pose, bool valid,
-             const Vec& target, double gap, int sample_segment=0) {
+             const Vec& target, double gap, int sample_segment=0, const Vec* goal=nullptr) {
         out_ << s.time_s << ',' << stage << ',' << pose << ',' << valid << ',' << s.transaction_ms << ','
              << s.rx_skew_ms << ',' << s.max_kernel_age_ms << ',' << gap;
         for (const auto& values : {s.q, s.dq, s.tau, target, s.rx_time}) for (double x : values) out_ << ',' << x;
         for (int x : s.status) out_ << ',' << x;
         for (const auto& values : {s.mos, s.coil}) for (double x : values) out_ << ',' << x;
-        out_ << ',' << sample_segment << '\n'; out_.flush();
+        out_ << ',' << sample_segment;
+        for(double x : (goal ? *goal : target)) out_ << ',' << x;
+        out_ << '\n'; out_.flush();
         if (!out_) throw std::runtime_error("sample log write failed");
     }
 private:
@@ -1289,9 +1298,99 @@ void move_static(Arm& arm, State& current, const Vec& target, const Settings& se
         cycle.finish(arm);
     }
 }
+// This ramp changes only the reference, never the experiment's target. Use
+// quintic limits stricter than normal transit; keep all existing guards.
+void trim_ramp(Arm& arm, State& current, Vec& command, const Vec& next,
+               const Vec& goal,const Settings& settings,Recorder& log,Cycle& cycle,
+               const std::string& pose) {
+    validate_target(next);
+    for(int i=0;i<N;++i) {
+        const double allowed=i==1 ? .100000001 : 1e-9;
+        if(std::abs(next[i]-goal[i])>allowed) throw std::runtime_error("trim reference offset bound");
+    }
+    const Vec start=command;
+    const double delta=std::abs(next[1]-start[1]);
+    const double duration=std::max({PERIOD_S,1.875*delta/.005,std::sqrt(5.774*delta/.02)});
+    const int count=int(std::ceil(duration/PERIOD_S));
+    for(int n=1;n<=count;++n) {
+        safety_phase="trim_ramp";safety_pose=pose;cycle.begin();
+        Vec cmd=start;cmd[1]=start[1]+(next[1]-start[1])*smooth(double(n)/count);
+        predicted_guard(current,cmd);
+        current=arm.command(cmd);command=cmd;
+        guard(current,settings,&cmd);guard(current,settings,&goal);
+        log.row(current,"trim_ramp",pose,false,cmd,cycle.gap_ms,0,&goal);
+        if(!current.sample_valid || cycle.gap_ms>1000*MAX_SAMPLE_GAP_S)
+            throw std::runtime_error("trim ramp feedback timing invalid");
+        cycle.finish(arm);
+    }
+}
+
+Vec trim_j2_reference(Arm& arm,State& current,const Vec& goal,const Settings& settings,
+                      Recorder& log,Cycle& cycle,const std::string& pose) {
+    Vec command=goal;const auto start=Clock::now();std::deque<State> history;
+    int updates=0;const size_t window=size_t(std::ceil(settings.stable_seconds/PERIOD_S))+1;
+    trim_records[pose]={{"experiment_target_rad",goal},{"updates",0},{"frozen",false},
+                        {"protocol","bounded-j2-v1"},{"direction_history_modified",true}};
+    while(elapsed(Clock::now(),start)<90) {
+        safety_phase="trim_wait";safety_pose=pose;cycle.begin();predicted_guard(current,command);
+        current=arm.command(command);guard(current,settings,&command);guard(current,settings,&goal);
+        bool quiet=current.sample_valid && cycle.gap_ms<=1000*MAX_SAMPLE_GAP_S;
+        for(int i=0;i<N;++i) {
+            quiet=quiet && std::abs(current.dq[i])<=settings.still_speed;
+            if(i!=1) quiet=quiet && std::abs(current.q[i]-goal[i])<=settings.capture_error;
+            if(!history.empty()) {
+                const double dt=current.rx_time[i]-history.back().rx_time[i];
+                quiet=quiet && dt>0 && dt<=MAX_SAMPLE_GAP_S;
+            }
+        }
+        if(!quiet)history.clear();else history.push_back(current);
+        while(history.size()>window)history.pop_front();
+        bool stable=history.size()==window;
+        for(int i=0;i<N && stable;++i) {
+            double lo=current.q[i],hi=lo;
+            for(const auto& h:history){lo=std::min(lo,h.q[i]);hi=std::max(hi,h.q[i]);}
+            stable=hi-lo<=settings.position_spread;
+        }
+        log.row(current,"trim_wait",pose,false,command,cycle.gap_ms,0,&goal);
+        cycle.finish(arm);
+        if(!stable)continue;
+        double mean=0;for(const auto& h:history)mean+=h.q[1];mean/=history.size();
+        const double error=goal[1]-mean;
+        trim_records[pose]["last_actual_error_rad"]=error;
+        trim_records[pose]["reference_rad"]=command;
+        if(std::abs(error)<=.003) {
+            trim_records[pose]["frozen"]=true;
+            std::cout<<pose<<": J2 reference frozen; target error="<<error<<" rad; reference offset="
+                     <<command[1]-goal[1]<<" rad\n";
+            return command;
+        }
+        if(++updates>40) {
+            last_safety_fault=fault_state(current,&command);
+            last_safety_fault["kind"]="trim_update_limit";
+            last_safety_fault["experiment_target_rad"]=goal;
+            throw std::runtime_error("J2 trim update count exhausted");
+        }
+        Vec next=command;next[1]+=std::clamp(.5*error,-.004,.004);
+        if(std::abs(next[1]-goal[1])>.10) {
+            last_safety_fault=fault_state(current,&command);
+            last_safety_fault["kind"]="trim_offset_limit";
+            last_safety_fault["experiment_target_rad"]=goal;
+            throw std::runtime_error("J2 trim 0.10rad offset exhausted; no automatic relaxation");
+        }
+        trim_records[pose]["updates"]=updates;
+        trim_records[pose]["next_reference_rad"]=next;
+        trim_ramp(arm,current,command,next,goal,settings,log,cycle,pose);
+        history.clear();
+    }
+    last_safety_fault=fault_state(current,&command);
+    last_safety_fault["kind"]="trim_timeout";last_safety_fault["experiment_target_rad"]=goal;
+    throw std::runtime_error("J2 reference trim timed out; target unchanged");
+}
+
 void hold_static(Arm& arm, State& current, const Vec& target, const Settings& settings,
                  Recorder& log, Cycle& cycle, const std::string& pose, bool collect,
-                 Vec* sampled_mean = nullptr) {
+                 Vec* sampled_mean = nullptr, const Vec* reference = nullptr) {
+    const Vec command=reference ? *reference : target;
     const auto start = Clock::now();
     std::deque<State> history;
     last_quality_event=Json::object();
@@ -1305,15 +1404,17 @@ void hold_static(Arm& arm, State& current, const Vec& target, const Settings& se
     const size_t window = size_t(std::ceil(settings.stable_seconds/PERIOD_S))+1;
     while (true) {
         safety_phase=sampling && collect ? "sample" : "settle"; safety_pose=pose;
-        cycle.begin(); predicted_guard(current, target);
-        current = arm.command(target); guard(current, settings, &target);
+        cycle.begin(); predicted_guard(current, command);
+        current = arm.command(command); guard(current, settings, &command);
+        guard(current, settings, &target);
         Json reasons=Json::array();
         Vec feedback_gaps{};
         if(!current.sample_valid) reasons.push_back("feedback_sample_timing");
         if(cycle.gap_ms>1000*MAX_SAMPLE_GAP_S) reasons.push_back("control_sample_gap");
         bool good = current.sample_valid && cycle.gap_ms <= 1000*MAX_SAMPLE_GAP_S;
         for (int i=0; i<N; ++i) {
-            if(std::abs(current.q[i]-target[i])>position_capture_limit) {
+            const double capture=(reference && settings.trim_j2 && i==1) ? .003 : position_capture_limit;
+            if(std::abs(current.q[i]-target[i])>capture) {
                 reasons.push_back("J"+std::to_string(i+1)+(actual_static ? ":static_capture_error" : ":settle_position_error")); good=false;
             }
             if(std::abs(current.dq[i])>settings.still_speed) {
@@ -1343,7 +1444,9 @@ void hold_static(Arm& arm, State& current, const Vec& target, const Settings& se
             }
         }
         if(!reasons.empty()) {
-            last_quality_event=fault_state(current,&target);
+            last_quality_event=fault_state(current,&command);
+            last_quality_event["experiment_target_rad"]=target;
+            last_quality_event["j2_trim_capture_limit_rad"]=reference ? Json(.003) : Json(nullptr);
             last_quality_event["kind"]="sampling_quality";
             last_quality_event["reasons"]=reasons;
             last_quality_event["position_spread_rad"]=spreads;
@@ -1374,7 +1477,7 @@ void hold_static(Arm& arm, State& current, const Vec& target, const Settings& se
             sampling=true; ++segment; valid_count=0; sum=Vec{}; sample_start=Clock::now();
         }
         const bool valid = sampling && stable && collect;
-        log.row(current, sampling && collect ? "sample" : "settle", pose, valid, target, cycle.gap_ms,segment);
+        log.row(current, sampling && collect ? "sample" : "settle", pose, valid, command, cycle.gap_ms,segment,&target);
         if (valid) {
             ++valid_count;
             for(int i=0;i<N;++i) sum[i]+=current.q[i];
@@ -1388,7 +1491,8 @@ void hold_static(Arm& arm, State& current, const Vec& target, const Settings& se
             std::cout << pose << ": " << valid_count << " stable samples accepted from segment " << segment << '\n'; return;
         }
         if (elapsed(Clock::now(),start)>settings.settle_timeout+settings.dwell) {
-            last_safety_fault=fault_state(current,&target);
+            last_safety_fault=fault_state(current,&command);
+            last_safety_fault["experiment_target_rad"]=target;
             last_safety_fault["kind"]="sampling_quality_timeout";
             last_safety_fault["last_quality_event"]=last_quality_event;
             last_safety_fault["restarts"]=restarts;
@@ -1406,7 +1510,7 @@ int main(int argc, char** argv) {
     for (int n=1; n<argc; ++n) {
         const std::string arg=argv[n];
         if (arg=="--version") {
-            std::cout << "openarm-static-v1-multi11-return-holdfix\n"; return 0;
+            std::cout << "openarm-static-v1-multi12-j2-trim\n"; return 0;
         } else if (arg=="--help") {
             std::cout << "openarm_static_torque [--diagnose] [--interface can0] [--output-root DIR]\n"
                          "openarm_static_torque --plan PLAN.json --execute [--interface can0]\n"; return 0;
@@ -1425,7 +1529,7 @@ int main(int argc, char** argv) {
     Json metadata{{"completed",false},{"mode", execute ? "static_motion" : "diagnose"},
                   {"interface",CAN_INTERFACE},{"period_s",PERIOD_S},
                   {"torque_source","motor reported estimate; not a calibrated external torque sensor"},
-                  {"software_version","openarm-static-v1-multi11-return-holdfix"},
+                  {"software_version","openarm-static-v1-multi12-j2-trim"},
                   {"sampling_schema","continuous-window-v1"}};
     metadata["acquisition_completed"]=false;
     metadata["return_completed"]=false;
@@ -1529,7 +1633,17 @@ int main(int argc, char** argv) {
             }
             move_static(arm,current,target,settings,log,cycle,name);
             Vec measured_mean{};
-            hold_static(arm,current,target,settings,log,cycle,name,true,&measured_mean);
+            Vec reference=target;
+            if(settings.trim_j2)reference=trim_j2_reference(arm,current,target,settings,log,cycle,name);
+            hold_static(arm,current,target,settings,log,cycle,name,true,&measured_mean,
+                        settings.trim_j2 ? &reference : nullptr);
+            if(settings.trim_j2) {
+                // Freeze throughout sampling, then smoothly withdraw the
+                // correction before following the original next transit.
+                trim_ramp(arm,current,reference,target,target,settings,log,cycle,name+"_trim_release");
+                trim_records[name]["released"]=true;
+                metadata["trim_records"]=trim_records;
+            }
             metadata["accepted_sample_windows"]=accepted_sample_windows;
             metadata["sample_window_rejections"]=sample_window_rejections;
             if(proximal) {
@@ -1667,6 +1781,7 @@ int main(int argc, char** argv) {
         std::cerr << "STOP: " << e.what() << "\nIf motors were enabled, bounded best-effort disable was attempted.\n"
                      "No acknowledgement/safe stop guarantee: check physical protection and motor state.\n";
         metadata["error"]=e.what();
+        metadata["trim_records"]=trim_records;
         metadata["accepted_sample_windows"]=accepted_sample_windows;
         metadata["sample_window_rejections"]=sample_window_rejections;
         if(!last_quality_event.is_null()) metadata["last_sampling_quality_event"]=last_quality_event;
