@@ -1,0 +1,228 @@
+OpenArm V1 七关节轨迹记录与 MuJoCo 反馈力矩回放 v1
+====================================================
+
+一、这套程序做什么
+
+实机：沿用 MIT 位置控制，发送缓慢、平滑的关节目标，记录运动全过程。
+仿真：把记录的七关节“电机反馈估计力矩”施加到 MuJoCo，比较预测角度与实测角度。
+实机并没有改成纯力矩开环控制。回放只在电脑仿真中进行，不发送 CAN 报文。
+支持 OpenArm V1 单右臂 J1～J7，无 J8、无夹爪。
+
+J1/J2：DM-J8009P-2EC，VMAX=45，TMAX=54。
+J3：DM-J4340P-2EC；J4：DM-J4340-2EC，VMAX=10，TMAX=28。
+J5/J6/J7：DM-J4310-2EC V1.1，VMAX=30，TMAX=10。
+PMAX 均为 12.5；这是协议量程，不是额定承载或安全力矩。
+电机 ID=1～7，反馈 ID=0x11～0x17；can0，CAN-FD 1Mbps/5Mbps。
+
+反馈力矩不是经过独立标定的输出轴传感器读数。默认按 Nm 数值直接回放是研究假设。
+如果反馈是传动前估计量，模型可能还需要相应传动摩擦；不能盲目乘减速比。
+本程序不会自动拟合力矩比例、修正模型质量，也不会宣称模型已经可以直接部署 RL。
+
+二、推荐目录
+
+将本压缩包中的 openarm_dynamic_replay 文件夹放到：
+/home/lsk/openarm_v1_ws/src/openarm-v1-project/tools/openarm_dynamic_replay
+
+不要覆盖 tools/proximal_torque。此包可以独立编译。
+模型默认位置：
+/home/lsk/openarm_v1_ws/src/openarm-v1-project/models/openarm_v1_right/openarm_v1_7dof.xml
+XML 引用的 meshes 等资源仍需保留相对目录。包内不附带你的模型或网格资源。
+数据默认写到：
+/home/lsk/experiments/dynamic_replay/session_日期_时间_编号/
+实验数据与源码分开，不必全部上传 Git。
+
+三、首次安装与编译：在 Ubuntu 终端执行
+
+cd ~/openarm_v1_ws/src/openarm-v1-project/tools/openarm_dynamic_replay
+sudo apt install build-essential cmake nlohmann-json3-dev python3-venv
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+cmake -S . -B build
+cmake --build build -j2
+./build/openarm_dynamic --version
+
+预期版本：openarm-dynamic-replay-v1。
+requirements 将 MuJoCo 固定为 3.3.7，保证冻结模型 MJB 与回放环境一致。
+本地 .venv 不修改系统 Python 或 ROS 2 环境。
+
+四、开机后准备 CAN：只在没有其他控制程序运行时执行
+
+ip -details link show can0
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 1000000 sample-point 0.75 dbitrate 5000000 dsample-point 0.75 dsjw 2 fd on restart-ms 0
+sudo ip link set can0 up
+ip -details -statistics link show can0
+
+如果没有 can0，先检查 lsusb、ip link 和驱动；不要盲目把另一个通道当成机械臂通道。
+run_dynamic.py 只检查接口，不自动修改 CAN 配置。
+关闭 monitor、其他采集程序、机器人 ROS 控制节点等竞争工具。
+机械臂需在已验证的支撑/防坠布置下起始；诊断阶段要求失能且不移动。
+运动采集时，支撑不得接触或承载机械臂；否则外力会污染力矩回放结果。
+
+五、只做规划，先查看运动目标
+
+cd ~/openarm_v1_ws/src/openarm-v1-project/tools/openarm_dynamic_replay
+.venv/bin/python -u run_dynamic.py --plan-only --joints 2 --amplitude-deg 5 --directions both --repeats 2 --torque-profile proximal_5_3
+
+该命令依次编译、检查 can0、进行约 3 秒只读诊断、读取当前起点、筛查模型路径、保存计划。
+不会发送使能或运动命令。不需要手工再运行 --diagnose 或设置上一轮目录变量。
+trajectory_targets.csv 可查看每段目标角度。单位 rad。
+
+默认左右两个方向分别相对起点偏移 5 度：
+起点 -> J2 +5度 -> 起点 -> J2 -5度 -> 起点；重复两次。
+J1、J3～J7 的目标维持起点，但实测位置仍可能变化，全部记录。
+--joints 2,4,7 表示依次测试这三个关节，不是同时运动。
+--directions positive 或 negative 可选单方向；被限位拒绝时应先评估姿态，不应直接扩大限位。
+支持幅度 1～15 度，默认 5 度。增加幅度需通过模型筛查及实际验证，不会自动增加。
+--speed 默认 0.02 rad/s；可选范围 0.005～0.05 rad/s，指参考轨迹峰值，不保证实际速度。
+初版使用五次平滑插值，没有严格的恒速平台，因此不能直接当成恒速摩擦辨识实验。
+
+默认 legacy_low 报警为 [2,2,1.5,1.5,0.7,0.7,0.7]。
+示例显式选择此前使用过的 proximal_5_3：[5,5,3,3,0.7,0.7,0.7] Nm。
+它们是软件报警，不是电机固件力矩钳位或机械承载认证。程序不会自动提高。
+
+六、执行实机采集
+
+.venv/bin/python -u run_dynamic.py --execute --joints 2 --amplitude-deg 5 --directions both --repeats 2 --torque-profile proximal_5_3
+
+会重新只读诊断并生成新计划，避免使用过时起点。
+审查打印的信息后，只有输入 RUN_DYNAMIC 并回车，才会使能和运动。
+
+控制过程：
+1. 校验电机 ID、控制模式、波特率代码、PMAX/VMAX/TMAX。
+2. 检查起点与诊断起点一致、反馈新鲜、机械臂没有移动。
+3. 预装载当前位置目标，再使能，验证初始稳定保持。
+4. 五次平滑目标轨迹逐段运动，每个端点固定保持 2 秒。
+5. 全程记录，不要求中间端点精确到位，不启用 J2 自动修正。
+6. 回到基准目标，检查实际稳定且误差在既有回程容差内。
+7. 保持等待用户安装支撑，输入 SUPPORTED 并回车，然后尝试失能。
+
+初始保持仍需稳定且与起始目标差 <=0.04rad；回程保持 <=0.08rad。
+这些只用于起始/结束验证。中间段不会因不满足静态采集精度而不断重试。
+位置、速度、反馈力矩、温度、0.16rad 跟踪报警、预测 PD 力矩、CAN 超时等保护仍保留。
+总控制周期为 50ms，非 20ms。采集间隔超过 75ms 或反馈质量不合格会停止。
+模型筛查只检查名义轨迹，不是对未知零点、质量、跟踪误差的碰撞保证。
+Ctrl+C 或故障会尝试失能，不能保证已实际失能；机械防坠必须覆盖断电和所有轨迹。
+软件不把 motor torque alarm 当成硬件钳位，不会故障后自动再使能。
+
+七、离线回放：机械臂不需要连接
+
+完成采集后，终端打印 dynamic_... 结果目录和回放命令。
+将下面的“实际结果目录”替换为打印的绝对路径，不能直接照抄占位文字：
+
+.venv/bin/python -u replay.py --run "实际结果目录"
+
+例如目录结构为：
+~/experiments/dynamic_replay/session_.../dynamic_...
+
+默认输出在该 dynamic_.../replay/。为了保留前次结果，同名目录存在时拒绝覆盖。
+重复分析可以指定 --out "新的输出目录"。
+如果采集中断，默认拒绝回放；明确添加 --allow-partial 可以分析已记录的前缀。
+缺帧/时间异常仍会拒绝，不会跨越缺失区间拼接。部分结果不等于完整实验通过。
+
+可选参数：
+--window-seconds 1       每个短窗口预测 1 秒，默认值。
+--window-stride 2        每 2 秒建立一个新窗口，默认值。
+--max-windows 100        最多 100 个窗口；超过会明确标记覆盖被截断。
+--dt 0.001              最大仿真积分步长 1ms；不是把真实采样提高到了 1kHz。
+--max-error-deg 30       仅仿真发散停止阈值，不影响机械臂报警。
+--position-budget-deg 1  用户定义角度误差预算示例；不是通用合格标准。
+--no-plot               只输出 CSV/JSON。
+--model "模型XML路径"   显式替换仿真模型进行离线对比，记录模型文件哈希。
+--calibration "JSON路径"显式提供 torque_scale 和 torque_bias_nm 两个长度7数组。
+                        默认比例全1、偏置全0；不自动优化，不隐含乘减速比。
+
+八、回放算法
+
+1. 默认读取本次冻结的 model.mjb，检查 SHA256 与 MuJoCo 版本。
+2. 按 joint_names 映射实际七关节；q_model=sign*q_motor+offset。
+   默认同向、零偏置，对应你此前陈述，但这不代表零点已经精密标定。
+3. 使用各关节 RX 内核接收时间戳对齐。位置/速度线性插值仅供初始状态与比较。
+4. 力矩按每个关节的采样时间做因果零阶保持，不使用未来的反馈力矩。
+5. 禁用模型执行器作用、清零 body gravcomp，避免与回放力矩重复驱动/补偿。
+6. 保留模型重力、惯量、阻尼、frictionloss、armature、接触和限位。
+7. 通过 qfrc_applied 施加七关节力矩，不再额外加 MIT PD。
+8. 每次积分在力矩更新时刻和输出时刻截断步长，避免跨事件误用力矩。
+9. 整段模式只初始化一次，之后自由运行；短窗口仅在窗口起点用实测状态初始化。
+10. 窗口内部不覆盖仿真位置。没有时间拉伸、延迟拟合或滤波来美化误差。
+11. 仿真接触、越过模型限位、非有限值、MuJoCo 警告或角度偏差超过阈值时，记录停止原因。
+12. 每个窗口独立评估；全段失败不妨碍尝试短窗口，但失败不会被从结论里隐藏。
+
+整段误差用于看累计漂移；短窗口用于看局部响应。
+50ms 力矩采样无法知道两个采样间真正的力矩变化，且 RX 时间不等于电机内部采样时间。
+因此回放误差同时包含模型误差、反馈估计误差、采样与时间误差，不能全归因于质量/惯量。
+记录的速度用于初始化，可能存在量化噪声；低速/静止初始条件也不是绝对零速度。
+
+九、记录哪些文件与字段
+
+session.json：整次诊断/规划/执行状态、结果目录、失败原因。
+prepared/plan.json：参数、关节映射、起点、目标序列、筛查计数、模型版本与哈希。
+prepared/trajectory_targets.csv：名义目标及每段保持时间。
+prepared/model.mjb：已编译的冻结模型，包含加载后的资源；有 MuJoCo 版本约束。
+diagnose_*/snapshot.json：只读起点与电机参数。
+dynamic_*/metadata.json：执行是否完成、是否返回、是否收到 SUPPORTED、故障详情。
+dynamic_*/model.mjb、plan.json：本次实际使用的计划与模型副本。
+dynamic_*/samples.csv：完整七关节轨迹，包括运动、端点保持、回程和结束保持。
+dynamic_*/timing.csv、timing.csv.jsonl：继承的通信事务诊断。
+
+samples.csv 的每行是一轮七关节采集，不表示七关节完全同时采样。
+time_s：这一轮最后一个反馈的相对接收时间，秒。
+stage：startup / diagnose / initial_hold / transit / record_hold / return_hold / end_hold。
+pose_id：当前轨迹段名称，不代表已经精确到达该姿态。
+feedback_valid：通信质量是否满足采样阈值，不代表静止或精确到位。
+command_sent：该轮是否发送 MIT 位置控制；诊断为0，运动为1。
+transaction_ms：整轮反馈事务耗时。
+rx_skew_ms：七关节接收时间最大跨度。
+max_kernel_age_ms：处理反馈时的最大内核时间戳年龄。
+cycle_gap_ms：控制循环开始时间间隔。
+q1～q7：实际编码器角度 rad。
+dq1～dq7：电机反馈速度 rad/s。
+tau1～tau7：按协议解码的估计力矩，暂按 Nm 解释。
+cmd1～cmd7：发送前的浮点位置参考 rad；诊断时仅为占位参考，不能当成发送记录。
+rx1～rx7：各关节反馈的内核接收时间，秒，同一相对时间原点。
+tx1～tx7：各关节本轮发送函数调用前的主机时间，秒；不是总线硬件发送时刻。
+status1～status7：电机状态码。
+mos1～mos7、coil1～coil7：反馈温度，摄氏度。
+cmd_effective1～7：按实际协议编码后反解得到的位置参考。
+kp_effective1～7、kd_effective1～7：量化后有效增益。
+vdes_effective1～7、ff_effective1～7：量化后有效速度参考与前馈；未必恰好为0。
+raw1_0～raw7_7：每个关节本轮采用的反馈8字节，十进制0～255。
+这些是被采用的反馈原始字节，不是全总线抓包；不包含被丢弃帧或所有参数回复。
+诊断阶段有效控制字段为空，不伪造已发送的控制命令。
+数据通常每20行刷盘；断电可能损失尚未刷盘部分，正常退出/异常栈展开会刷新文件。
+
+replay/full_prediction.csv：整段预测的实测/仿真角度、误差、速度和时间。
+replay/window_predictions.csv：每个短窗口内的实测与预测角度。
+replay/metrics.csv：每关节角度偏置、RMSE、P95绝对误差、最大绝对误差，单位度。
+replay/angles_and_errors.png：七关节角度对比与误差图；仅显示整段实际成功积分的部分。
+replay/report.json：完整统计、每窗口停止原因、模型设置、数据哈希、采样局限等。
+
+十、如何理解结果
+
+默认不输出“模型合格”，因为尚未给定任务误差预算，且反馈力矩含义未标定。
+提供 --position-budget-deg 后，只判断该批数据的角度是否在用户预算内。
+整段/任一窗口中止、窗口截断或采集未完成，都不能判定为预算内。
+report.json 顶层 completed 表示分析完成；full.completed 才表示整段仿真完成。
+初始角度被对齐，因此短窗口汇总排除每个窗口的第一个零误差点。
+重复样本不是独立统计证据，当前指标不包含置信区间。
+本版本不自动计算末端精度、不输出模型质量误差百分比、不认定反馈等于真实关节力矩。
+
+优先先做 J2 的5度短轨迹，再在已审核范围扩展到 J4、J7。
+实际基本不动时仍保留数据，这本身就是摩擦/控制作用不足的信息；不能把它称为成功激励。
+下一阶段应补做“相同位置目标/KP/KD/前馈”的闭环仿真验证，力矩回放不能替代它。
+
+十一、文件作用
+
+run_dynamic.py：Ubuntu一键诊断、模型筛查、编译和启动采集，默认只规划。
+openarm_dynamic.cpp：SocketCAN 收发、MIT运动、七关节连续记录、保护与结束保持。
+replay.py：纯离线 MuJoCo 力矩回放、整段/短窗口误差、CSV/JSON/PNG输出。
+torque_model.py：沿用的七关节模型加载/映射工具；本包调用其 Model，不使用其静态 compare 作为动态结论。
+prepare_local_pilot.py：沿用的只读诊断快照新鲜度检查；不应直接运行它来启动本实验。
+safety.template.json：保留的原始配置模板依赖；本包实际配置保存在 prepared/plan.json。
+CMakeLists.txt：编译 C++。
+requirements.txt：Python环境依赖。
+COLCON_IGNORE：避免 ROS colcon 把独立实验工具当成工作区包。
+VERIFICATION.txt：交付前完成的验证及尚未完成的实机验证。
+test_offline.py：离线算法与合成 MuJoCo 测试，不连接机械臂。
+
+本版本不包含 Windows 实机控制入口。Windows可以保存代码、阅读结果，并在兼容 Python/MuJoCo 环境中离线回放。
