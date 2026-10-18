@@ -1,0 +1,27 @@
+交付前验证记录（2026-10-18）
+
+验证平台：Windows，Python 3.12，MuJoCo 3.3.7，SB3 2.7.0，Gymnasium 1.2.1。
+加载用户工程现有模型及 meshes：
+D:/Projects/openarm-v1-project/models/openarm_v1_right/openarm_v1_7dof.xml
+名义编译模型 SHA256：
+45a759aaae07a5b6c1824ce88bd6a354680fb7c36d288cda3b3f9252f2151278
+
+1. prepare：起点/目标及名义插值路径检查通过；末端直线距离 0.143652547 m。
+2. preflight：20 个随机种子的初始化全部通过。
+3. 确定性参考控制基准：20.68 秒达到成功条件，终点误差 0.000869810 m。
+   这是模型辅助的基准控制，不是 PPO，不能作为已训练策略精度。
+4. test_contract.py：7 项测试通过。
+   覆盖积分与加速度约束、零动作保持参考、配置合同变化、初始化保持、
+   观察合法性、零动作稳定保持、随机重置复现、参考范围约束。
+5. PPO smoke：1 个环境、512 个 transition，完成一次 rollout 和更新；
+   正常保存 policy.zip、config、contract、progress 和 training_status。
+6. 保存权重重新加载评估：名义 1 回合、随机化 1 回合，均无保护故障，
+   但均超时未成功，最终距离分别 0.141654 m 和 0.141604 m。
+   512 步仅验证管线，不能用于判断 500000 步的收敛效果。
+7. 全部 Python 文件语法编译通过。
+
+没有执行完整 500000 步训练，没有运行真实机械臂，没有打开 CAN。
+尚未在用户 Ubuntu 上执行，也未在本次验证中打开交互式 viewer 窗口。
+断点继续训练入口做了实现，但本次未完整跑续训实验。
+请在 Ubuntu 上先运行 prepare 和 preflight，然后开始正式训练。
+不附带此 smoke 权重，以免误认为它是可用的点到点策略。
