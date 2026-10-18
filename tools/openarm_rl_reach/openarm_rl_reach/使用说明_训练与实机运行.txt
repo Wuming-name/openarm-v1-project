@@ -1,0 +1,229 @@
+OpenArm V1 七关节 PPO 到点程序 v1
+================================
+
+一、用途与范围
+
+适用：右臂 J1～J7，去掉 J8 与夹爪。Ubuntu 22.04，SocketCAN can0，CAN-FD 1M/5M。
+J1/J2 DM-J8009P；J3 DM-J4340P；J4 DM-J4340；J5～J7 DM-J4310。
+发送 ID 1～7，反馈 ID 0x11～0x17。启动会核对实际电机的协议范围、ID、MIT 模式与波特率代码。
+
+这是可训练、可评估、可通过 CAN 部署的初版源代码，不包含已经训练成功的策略权重。
+第一版只训练一个实机记录过的目标点。目标位置虽作为输入，但未训练的新目标没有泛化保证。
+只控制末端位置，不强制末端方向；前馈力矩固定为零。不是力控、抓取或碰撞接触任务。
+不改电机零点、不写电机参数、不自动增大保护值、不自动重试运动。
+
+运行位置：
+/home/lsk/openarm_v1_ws/src/openarm-v1-project/tools/openarm_rl_reach
+
+把压缩包里的 openarm_rl_reach 整个文件夹放进项目 tools 下，不覆盖之前的工具。
+文件夹内应直接看到 robot.py、core.py、train.py、can_bridge.cpp，避免套两层同名目录。
+已有模型和 meshes 保留在：
+/home/lsk/openarm_v1_ws/src/openarm-v1-project/models/openarm_v1_right/
+本包不附带或重写你的真实模型与 meshes。
+
+二、各文件作用
+
+core.py：仿真/实机共用的输入归一化、参考角度平滑器、MIT 量化、运动学与模型检查。
+reach_env.py：Gymnasium 环境、动力学步进、奖励、成功判定和异常终止。
+train.py：PPO 训练和独立随机种子评估，不访问 CAN。
+robot.py：初始化配置、记录起终姿态、只读诊断、只读时序测试、实机协调。
+can_bridge.cpp：复用之前验证过的 SocketCAN 协议代码，独立检查命令/反馈/时序。
+config.template.json：初始配置；home/goal_q 有意留空，不能直接授权运动。
+test_offline.py：纯离线单元与物理引擎测试，不访问电机。
+CMakeLists.txt：编译 C++ CAN 通信桥。
+COLCON_IGNORE：这个目录独立运行，不参与 ROS colcon 构建。
+
+三、安装（在 Ubuntu 终端执行）
+
+cd ~/openarm_v1_ws/src/openarm-v1-project/tools/openarm_rl_reach
+sudo apt update
+sudo apt install build-essential cmake nlohmann-json3-dev python3-venv
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip
+
+先安装 CPU 版 PyTorch，避免为这个小网络下载完整 CUDA 依赖：
+.venv/bin/python -m pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cpu
+.venv/bin/python -m pip install -r requirements.txt
+
+cmake -S . -B build
+cmake --build build -j2
+.venv/bin/python test_offline.py -v
+
+记录实际环境：
+.venv/bin/python -m pip freeze > environment.lock.txt
+
+不需要 source ROS 2，不修改系统 Python，不需要 sudo 运行 Python。
+若 GitHub/下载源网络失败，可以在当前终端使用之前已验证的代理；程序本身不替你修改代理。
+
+四、第一次初始化配置
+
+.venv/bin/python robot.py init
+
+生成 config.local.json，自动填写这个项目的模型绝对路径。
+如果模型不在默认目录：
+.venv/bin/python robot.py init --model /你的绝对路径/openarm_v1_7dof.xml
+
+init 不覆盖已有配置。以下所有命令默认使用当前目录 config.local.json。
+
+base_body 默认 world，所以默认位置是模型世界坐标。仅当模型的固定基座与该坐标系
+一致时可称为基座坐标。也可以填写模型中真实的固定基座 body 名称；程序拒绝移动基座。
+ee_site 默认 ee_site：必须确认它代表去掉夹爪后的实际法兰/TCP，而不是旧夹爪尖端。
+offset 默认 0、sign 默认 +1，沿用现有假设，不代表零点已精确标定。
+
+五、连接 CAN 和记录安全起始姿态
+
+先确认名称：
+ip -br link
+
+若为 can0，且没有其他控制程序在运行：
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 1000000 sample-point 0.75 \
+    dbitrate 5000000 dsample-point 0.75 dsjw 2 fd on restart-ms 0
+sudo ip link set can0 up
+ip -details -statistics link show can0
+
+机械臂可靠支撑、处于失能静止状态时：
+.venv/bin/python robot.py diagnose
+
+这一步只读取参数和状态，不使能、不失能、不回零。
+
+用你已验证的操作方式把机械臂放到安全起始姿态，支撑并失能后记录：
+.venv/bin/python robot.py capture-home
+
+不建议强行全零。J4 的模型下限是 0，程序要求留 0.04 rad 余量，全零会被拒绝。
+capture-home 只是把读到的角度存入配置，不设置电机机械零点，也不自动搬动机械臂。
+
+再用已验证的方式到达一个邻近目标姿态，支撑并失能后记录：
+.venv/bin/python robot.py capture-goal
+
+初版每关节目标相对 home 不超过 0.15 rad（约 8.6°）。尽量选末端位移大于 4 cm 的
+可达目标，否则 2 cm 的成功容差可能让机械臂不动就成功。不要为了凑距离越过安全范围。
+如果需改变成功容差，在训练前修改，并考虑没有外部测量时的实际可信精度。
+重复记录已存在的 home/goal 会拒绝；若确需更换，显式把对应值改回 null 再记录。
+修改起点/目标/控制设置后需要重新训练，旧策略会被配置指纹检查拒绝。
+
+.venv/bin/python robot.py inspect
+
+检查输出的关节角度、起终点坐标和模型。路径检查只包含名义模型，不证明真实无碰撞。
+保护装置应覆盖失电坠落和整个运动范围，采样时不能靠支撑承重。
+
+六、仿真训练和评估
+
+.venv/bin/python -u train.py --steps 500000 --envs 4 --out runs/ppo_first
+
+500000 是初始训练预算，不是收敛保证。程序会输出训练日志，保存：
+runs/ppo_first/policy.zip       策略与 PPO 参数
+runs/ppo_first/config.json      本次配置
+runs/ppo_first/contract.json    输入/输出/控制/模型指纹
+runs/ppo_first/progress.csv     训练指标
+
+已有 runs/ppo_first 时不覆盖；下次训练改用 runs/ppo_second 等名称。
+
+.venv/bin/python train.py --evaluate runs/ppo_first --episodes 20
+
+评估包含 20 次名义模型和 20 次随机化模型，使用与训练不同的随机种子。
+输出 evaluation.json、evaluation.csv。随机化质量/惯量 ±10%，摩擦/阻尼 ±30%，
+并加入少量编码器/速度噪声；这些是起始实验假设，不是已辨识的真实不确定性。
+没有模拟随机网络掉包或任意延迟，没有完成未见目标验证。
+
+评估文件记录策略 SHA256，换权重后不能沿用旧报告。
+初版实机门槛：名义成功率至少 95%，随机化至少 80%，并各至少 20 回合。
+这些只是代码的初步筛选门槛，不等于实机安全认证。未达到先检查环境/训练，不改门槛凑通过。
+仅误差变小不算成功：还要实际低速、参考基本停止并保持 1 秒。
+
+七、上机前只读检查
+
+先把机械臂用已验证方式放回 home 附近，可靠支撑并失能，关闭其他 CAN 工具。
+程序只允许当前各关节距离 home 小于 0.08 rad（约 4.6°）时执行局部回位，
+不支持从任意未知姿态自动回零，也没有自动搜索绕障路径。
+
+只做模型/策略检查，不打开 CAN：
+.venv/bin/python robot.py deploy --policy runs/ppo_first
+
+带真实 CAN 查询、策略推理和模型检查的 30 秒时序测试，但不使能：
+.venv/bin/python robot.py timing --policy runs/ppo_first
+
+不通过先检查 timing.csv。不要通过放大超时阈值来掩盖之前的 103 ms 间隔。
+只读测试成功也不等于实时性保证，实际带负载时仍持续检查。
+
+八、实际启动：自动检查 → 局部回位 → 策略到点
+
+确认 config.local.json 中 home、goal_q、模型、方向、零点假设、速度和保护值正确，
+将 hardware_reviewed 从 false 改为 true。这个标记只表示你检查过本次配置，不代表
+程序已替你验证机械零点、负载或实际空间避障。
+
+.venv/bin/python robot.py deploy --policy runs/ppo_first --execute
+
+程序重新读取实际角度和参数，检查回位路径；输入 RUN_REACH 才使能。
+从当前角度平滑回到 home，稳定保持 1 秒后策略开始运行。
+若不能满足回位误差/速度条件，停止，不使用 RL 强行补救。
+
+到达目标或任务超时：平滑停止参考变化，保持当前参考。此版不自动再返回 home。
+装好支撑后输入 SUPPORTED，才结束并尝试失能。
+Ctrl+C、时序/反馈/保护异常时会尝试失能，不保证确认失能，更不保证重力安全保持。
+支撑确认最多等待 5 分钟；不要无人看管。异常不自动重启。
+
+当前不安装 systemd 开机运动服务。“自动”是一次显式启动后的检查、局部回位与策略执行。
+Windows 可以用于编辑和仿真训练，CAN 部署仅支持 Linux。
+
+九、网络与控制的实际定义
+
+34 维输入顺序：
+q 归一化 7 + dq/速度报警值 7 + (q_ref-q)/跟踪报警值 7 + 上一次动作 7
++ 目标位置/0.6m 3 + (目标位置-FK(q))/0.3m 3。
+FK 使用实际反馈角度，模型映射 q_model=sign*q_motor+offset。
+固定归一化，没有隐藏的 VecNormalize 统计量。
+
+PPO actor/critic 各两层 128 Tanh。部署用 deterministic=True。
+7 维动作裁剪到 [-1,1]，解释为参考角速度比例。
+策略每 100ms 更新；每 20ms 经加速度限制积分参考角度：
+v_ref 接近 action*reference_speed；q_ref += v_ref*0.02。
+因此它等价于受约束的角度增量，而不是直接把编码器角度加一个任意大步长。
+仿真积分 1ms，外层参考 20ms保持；实机电机内部位置/速度反馈环持续工作。
+Kp=[35,35,20,20,6,6,6]，Kd=[4,4,2,2,0.8,0.8,0.8]。
+MIT 速度目标=0、力矩前馈=0。量化后的零值有微小偏差，仿真已复现。
+仿真关闭 XML 中已有执行器输出，再施加计算的 PD 广义力，避免重复控制。
+保留模型惯量、摩擦、阻尼等；关闭额外 body_gravcomp，避免暗中补偿重力。
+
+奖励：末端距离改善、距离惩罚、关节速度惩罚、动作变化惩罚、偏离home的轻微姿态惩罚。
+成功需在位置容差内且低速保持；越界、碰撞或力矩等保护失败提前结束回合。
+此版没有方向控制、J2修正、学习前馈力矩、真实在线训练或自动参数辨识。
+
+十、时序与保护实现
+
+C++ 与 Python 使用本机 socketpair 顺序包，不开放网络监听端口。
+C++ 每次只接受对应最新观测序号的参考；延迟超过 40ms 或反馈过旧，在下一条
+运动命令发送前停止。CAN 单次事务期限 20ms。两端所有速度/位置检查都保留。
+Python 推理不在 CAN 接收函数内部，但与控制桥逐周期握手；Python卡顿会停止运动，
+不会无期限保持旧策略动作。它仍不是硬实时系统。
+没有擅自调高实时优先级；如果推理/模型检查不能稳定通过，应先优化或调整架构。
+
+日志在运行期间保存在有上限的内存容器中，停机尝试失能之后写盘。
+优点是减少同步磁盘写入卡顿；代价是断电、强杀或进程崩溃可能丢失尚未写出的日志。
+本程序不声称异步线程解决了所有调度延迟，也不能替代驱动/固件看门狗。
+参考 PD 力矩预检查是软件估计，不是电机硬件电流限幅。
+
+十一、数据存储
+
+所有实机诊断与运行日志默认在：
+/home/lsk/experiments/rl_reach/
+
+diagnose_时间/snapshot.json：七关节静止角度、速度、状态、参数核对结果。
+reach_时间/samples.csv：反馈时间、循环间隔、事务耗时、接收跨度、报文年龄、有效性；
+                       每关节角度、速度、反馈力矩、参考角度、状态、MOS/线圈温度、发送/接收时间。
+reach_时间/timing.csv：底层发送/等待/解析耗时、报文数、重试、错误原因和周期。
+reach_时间/metadata.json：配置、参数、通信桥是否正常结束、故障信息。
+reach_时间/policy.jsonl：策略阶段、观测序号、动作、参考、角度速度、FK末端估计。
+reach_时间/session.json：目标位置、到点成功/任务超时、支撑退出确认、协调器错误。
+
+metadata.completed 仅表示通信桥正常完成支撑退出；到点成功还要看
+session.acquisition_completed 和 session.result，任务超时不算成功。
+disable_confirmed 始终不声称已得到电机失能确认。
+
+模型 FK 位置不是外部位置测量。当前能验证编码器闭环重复性和估计位置误差，
+不能据此宣称真实末端毫米级精度。质量/摩擦随机化不能修复错误零点或关节映射。
+
+依赖/API依据：
+https://stable-baselines3.readthedocs.io/en/master/modules/ppo.html
+https://gymnasium.farama.org/introduction/create_custom_env/
+https://mujoco.readthedocs.io/en/stable/programming/simulation.html
