@@ -1,0 +1,18 @@
+本次更新只修改can_bridge.cpp的诊断和日志，不改变任何阈值或运动命令。
+
+对应故障：shadow首次查询后出现Feedback threshold J4，但没有具体反馈数值。
+现在会同时列出所有触发项（角度、速度、反馈力矩、MOS温度、线圈温度）及读数、限值。
+首次反馈在检查前保留于bridge/metadata.json的startup_feedback与samples.csv，包含原始字节。
+日志只在退出时落盘，不在已使能的控制周期内新增磁盘写入。
+只读失败的提示明确说明未发送使能和MIT运动命令。
+修正终端中出现的五处误导缩进警告；控制逻辑保持原样。
+
+安装：
+将补丁里的can_bridge.cpp覆盖Ubuntu以下同名文件：
+/home/lsk/openarm_v1_ws/src/openarm-v1-project/tools/openarm_v2_trial_20261019/can_bridge.cpp
+保留trial.py、sim_core.py、训练配置和所有权重，不要覆盖其他文件。
+
+安装后回到原来的终端重新运行shadow；会自动重新编译。
+把新STOP行全文发回，或提供新输出目录的bridge/metadata.json。
+由于桥源码哈希改变，旧shadow/hold-test凭据不再匹配，后续要按原顺序重新通过。
+本更新没有在助手侧编译Linux桥；需由Ubuntu本机编译后验证。

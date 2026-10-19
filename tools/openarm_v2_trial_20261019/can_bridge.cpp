@@ -886,7 +886,7 @@ double bounded(const Json& cfg, const char* key, double low, double high) {
 }
 
 // New reach bridge: lock, bounded IPC deadline, pre-send timing checks, memory logging.
-constexpr const char* VERSION="openarm-reach-supervised-trial-v2";
+constexpr const char* VERSION="openarm-reach-supervised-trial-v2-diagnostics-r2";
 struct Entry {State s; Vec ref; double gap;};
 double vmax=.02,amax=.04,temp=55,radius=.15;
 Vec home{};
@@ -915,8 +915,25 @@ void checked(const State& s,const Vec* ref=nullptr) {
     for(int j=0;j<N;++j){
         if(!std::isfinite(s.q[j])||!std::isfinite(s.dq[j])||!std::isfinite(s.tau[j])||
            s.q[j]<QMIN[j]||s.q[j]>QMAX[j]||std::abs(s.dq[j])>SPEED_ALARM[j]||
-           std::abs(s.tau[j])>TORQUE_ALARM[j]||s.mos[j]>=temp||s.coil[j]>=temp)
-            throw std::runtime_error("Feedback threshold J"+std::to_string(j+1));
+           std::abs(s.tau[j])>TORQUE_ALARM[j]||s.mos[j]>=temp||s.coil[j]>=temp) {
+            std::ostringstream message;
+            message << std::setprecision(12) << "Feedback threshold J" << j+1 << ": ";
+            if(!std::isfinite(s.q[j])) message << "q_nonfinite; ";
+            if(!std::isfinite(s.dq[j])) message << "dq_nonfinite; ";
+            if(!std::isfinite(s.tau[j])) message << "tau_nonfinite; ";
+            if(s.q[j]<QMIN[j]) message << "q_below_min; ";
+            if(s.q[j]>QMAX[j]) message << "q_above_max; ";
+            if(std::abs(s.dq[j])>SPEED_ALARM[j]) message << "speed_above_limit; ";
+            if(std::abs(s.tau[j])>TORQUE_ALARM[j]) message << "torque_above_limit; ";
+            if(s.mos[j]>=temp) message << "mos_temperature_at_or_above_limit; ";
+            if(s.coil[j]>=temp) message << "coil_temperature_at_or_above_limit; ";
+            message << "q=" << s.q[j] << " rad, q_range=[" << QMIN[j] << ',' << QMAX[j]
+                    << "]; dq=" << s.dq[j] << " rad/s, abs_limit=" << SPEED_ALARM[j]
+                    << "; tau_feedback=" << s.tau[j] << ", abs_limit=" << TORQUE_ALARM[j]
+                    << "; mos=" << s.mos[j] << ", coil=" << s.coil[j]
+                    << ", temperature_limit=" << temp << "; status=" << s.status[j];
+            throw std::runtime_error(message.str());
+        }
         if(ref&&(std::abs((*ref)[j]-s.q[j])>TRACK_ALARM||std::abs(s.q[j]-home[j])>radius||s.status[j]!=1))
             throw std::runtime_error("Tracking/envelope/status J"+std::to_string(j+1));
     }
@@ -964,9 +981,16 @@ void save_entries(const fs::path& dir,const std::vector<Entry>& data){
     f<<'\n'<<std::setprecision(12);
     for(const auto& x:data){const auto&s=x.s;
         f<<s.time_s<<','<<x.gap<<','<<s.transaction_ms<<','<<s.rx_skew_ms<<','<<s.max_kernel_age_ms<<','<<s.sample_valid;
-        for(double v:s.q)f<<','<<v;for(double v:s.dq)f<<','<<v;for(double v:s.tau)f<<','<<v;for(double v:x.ref)f<<','<<v;
-        for(int v:s.status)f<<','<<v;for(double v:s.mos)f<<','<<v;for(double v:s.coil)f<<','<<v;
-        for(double v:s.rx_time)f<<','<<v;for(double v:s.tx_time)f<<','<<v;f<<'\n';
+        for(double v:s.q) { f<<','<<v; }
+        for(double v:s.dq) { f<<','<<v; }
+        for(double v:s.tau) { f<<','<<v; }
+        for(double v:x.ref) { f<<','<<v; }
+        for(int v:s.status) { f<<','<<v; }
+        for(double v:s.mos) { f<<','<<v; }
+        for(double v:s.coil) { f<<','<<v; }
+        for(double v:s.rx_time) { f<<','<<v; }
+        for(double v:s.tx_time) { f<<','<<v; }
+        f<<'\n';
     }
     f.flush();if(!f)throw std::runtime_error("Sample file save failed");
 }
@@ -988,6 +1012,8 @@ int main(int argc,char**argv){
         if(execute&&shadow)throw std::runtime_error("Cannot combine execute and shadow");
         if(config.empty()||output.empty()||fs::exists(output))throw std::runtime_error("Config required; output must not exist");
         fs::create_directories(output);created=true;auto c=read_json(config);configure(c,execute);meta["config"]=c;
+        meta["motion_requested"]=execute;
+        meta["shadow_requested"]=shadow;
         const char* userhome=std::getenv("HOME");if(!userhome)throw std::runtime_error("HOME missing");
         fs::path lock=fs::path(userhome)/".cache/openarm_static_torque.lock";fs::create_directories(lock.parent_path());
         lockfd=::open(lock.c_str(),O_CREAT|O_RDWR|O_CLOEXEC,0600);
@@ -995,7 +1021,14 @@ int main(int argc,char**argv){
         entries.reserve(45000);
         {
             Arm arm((output/"timing.csv").string());meta["motor_parameters"]=arm.verify_parameters();
-            State state=arm.query(false);require_disabled(state);checked(state);
+            State state=arm.query(false);
+            // Retain the first sample BEFORE validation; a rejected startup is evidence too.
+            // Only memory writes here; disk output remains outside the control session.
+            meta["startup_feedback"]=Json{{"q",state.q},{"dq",state.dq},{"tau_feedback",state.tau},
+                {"mos",state.mos},{"coil",state.coil},{"status",state.status},
+                {"valid",state.sample_valid},{"raw",state.raw},{"time_s",state.time_s}};
+            entries.push_back({state,state.q,0});
+            require_disabled(state);checked(state);
             Vec baseline=state.q;
             for(int i=0;i<25;++i){auto t=Clock::now();state=arm.query(false);require_disabled(state);checked(state);
                 for(int j=0;j<N;++j)if(std::abs(state.q[j]-baseline[j])>.003||std::abs(state.dq[j])>.04)
@@ -1040,10 +1073,18 @@ int main(int argc,char**argv){
             }
         } // Arm destructor attempts disable BEFORE any bulk disk writes.
         save_entries(output,entries);write_json(output/"metadata.json",meta);
-        if(lockfd>=0)::close(lockfd);return 0;
+        if(lockfd>=0) { ::close(lockfd); }
+        return 0;
     }catch(const std::exception&e){
-        meta["error"]=e.what();std::cerr<<"STOP: "<<e.what()<<"; if enabled, disable attempted, NOT confirmed.\n";
+        meta["error"]=e.what();
+        std::cerr<<"STOP: "<<e.what();
+        if(execute) {
+            std::cerr<<"; if enabled, disable attempted, NOT confirmed.\n";
+        } else {
+            std::cerr<<"; read-only stage: no enable or MIT motion commands sent.\n";
+        }
         try{if(created){save_entries(output,entries);write_json(output/"metadata.json",meta);}}catch(...){}
-        if(lockfd>=0)::close(lockfd);return 1;
+        if(lockfd>=0) { ::close(lockfd); }
+        return 1;
     }
 }
