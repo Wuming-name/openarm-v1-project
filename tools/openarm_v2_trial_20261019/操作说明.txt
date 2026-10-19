@@ -1,0 +1,98 @@
+OpenArm sim-v2 当前权重的单次、有人值守实机试运行
+日期：2026-10-19
+
+一、适用范围
+仅针对 SHA256 为 e56c2e17c48c2fa2157661be8f842d3b03cde96869eb90b01d24efbd4ca663b3 的 policy.zip。
+训练目录：runs/goal14cm_resume_20261019_105544。
+原始仿真成功率仍为0；本包不修改评估、不伪造成功、不改变原训练配置。
+inspect/shadow不使能；hold-test/trial加--execute并键入对应口令才使能。
+不安装ROS/CAN驱动，不配置/关闭CAN接口，不重新标零，不运行任意姿态自动回零。
+
+二、安装位置
+将整个openarm_v2_trial_20261019文件夹放到Ubuntu：
+/home/lsk/openarm_v1_ws/src/openarm-v1-project/tools/openarm_v2_trial_20261019
+不要覆盖tools/openarm_rl_reach或tools/openarm_rl_reach_sim。
+使用现有训练虚拟环境；不需要重新训练。
+
+三、物理准备
+起点A=[0,0,0,0.4,0,0,0]rad，J4约22.92度，其余为0。
+通过你已经验证过的定位/支撑方法使实际角度接近A，各关节误差<=0.005rad（约0.286度）。
+不要在无支撑状态下直接失能来摆位；如果做不到该条件，程序拒绝启动策略。
+启用前要求电机报告失能、机械臂稳定；不要同时运行其他电机测试/控制程序。
+保留急停，并使用能承接重力下落的支撑或防坠措施；支撑不能在策略运动时加载机械臂。
+建议由另一人管理支撑，操作者管理终端和停止操作。
+STOP+回车是主机有序减速请求，不能替代急停。Ctrl+C/故障/通讯中断可导致尝试失能、机械臂下落。
+正常结束没有自动回A：先减速保持，再物理支撑，然后输入SUPPORTED退出。
+
+四、命令（均在Ubuntu执行，每一步通过后再做下一步）
+首先进入训练包目录，保持模型相对路径与原训练一致：
+
+cd /home/lsk/openarm_v1_ws/src/openarm-v1-project/tools/openarm_rl_reach_sim
+RL_PY=/home/lsk/openarm_v1_ws/src/openarm-v1-project/tools/openarm_rl_reach/.venv/bin/python
+TRIAL=/home/lsk/openarm_v1_ws/src/openarm-v1-project/tools/openarm_v2_trial_20261019/trial.py
+RUN=/home/lsk/openarm_v1_ws/src/openarm-v1-project/tools/openarm_rl_reach_sim/runs/goal14cm_resume_20261019_105544
+
+1. 离线检查（无需开机械臂电源，不打开CAN）：
+"$RL_PY" "$TRIAL" inspect --config config.sim.json --run "$RUN"
+
+2. 准备支撑起点A，电机失能、上电，接口已按现有方法配置。先查看接口：
+ip -details -statistics link show type can
+下面假设实际接口为can0。如实际为can1，后面所有步骤一致改为can1。
+
+3. 30秒只读查询、模型检查和策略推理（自动本机编译C++桥，不使能）：
+"$RL_PY" "$TRIAL" shadow --config config.sim.json --run "$RUN" --interface can0
+
+4. 单独验证起点保持（不运行策略）：
+"$RL_PY" "$TRIAL" hold-test --config config.sim.json --run "$RUN" --interface can0 --execute
+键入RUN_HOLD_TEST开始；保持物理支撑。
+PRELOAD_READY出现后，慢慢解除支撑负载，保留非接触承接措施。
+只有完全解除支撑负载后输入RELEASED。
+程序要求实际姿态在A附近稳定1秒，然后测试固定参考保持5秒。
+如果位置/速度无法保持，不进入策略；不要用手强行维持来让检查通过。
+完成后出现HOLD，装好承重支撑再输入SUPPORTED。
+
+5. 首次策略仅运行5秒：
+"$RL_PY" "$TRIAL" trial --config config.sim.json --run "$RUN" --interface can0 --seconds 5 --execute
+键入RUN_SHORT_TRIAL；依照相同流程解除支撑并输入RELEASED。
+起点稳定1秒才开始策略。运行5秒后减速并保持，装支撑后输入SUPPORTED。
+5秒只能观察初始运动，不能验证约14秒才出现的到点效果。
+
+6. 检查5秒日志、确认方向和响应正常后，重新用已验证的方法准备A并完成同样过程：
+"$RL_PY" "$TRIAL" trial --config config.sim.json --run "$RUN" --interface can0 --seconds 15 --execute
+策略最长15秒，之后自动停止策略、将参考速度减到0并保持。
+这不是45秒完整任务，也不保证真实末端到点；不自动回起点。
+shadow和hold-test的通过记录必须来自同权重/配置/模型/接口，且在一小时内。
+
+五、程序行为和限制
+保持训练的34维观测、7维动作、10Hz策略和50Hz目标更新、0.02rad/s参考速度、0.04rad/s²加速度。
+MIT目标速度与前馈字段为0，延续现有编码量化。
+起点先在物理支撑下平滑建立模型估计的PD参考偏置，再通过实测保持检查。
+该偏置只用于起点初始化，不做运行期重力前馈，也不承诺其等于实机所需偏置。
+保留力矩反馈/预测、速度、跟踪、温度、行程、局部范围、反馈新鲜度、40ms发送前超时保护。
+局部参考/实际范围分别沿用训练值0.40/0.45rad；不是经过物理认证的运动空间。
+模型接触和名义负载检查不能检测现实中的桌面、人体或未建模障碍。
+实际CAN编码由独立C++桥发送；Python故障、EOF、桥超时会尝试失能，不能保证防坠。
+部署时不要求修改simulation_only或hardware_reviewed，不把旧v1程序伪装成v2。
+旧生产式评估门槛保留在旧程序里；这里是明确标记的单次试验模式，不宣称满足原门槛。
+
+六、输出
+默认目录：/home/lsk/experiments/rl_v2_trial/
+每次新建独立目录，不覆盖原实验。
+session.json：阶段、权重哈希、结果和错误；passed只代表该阶段完成，不代表实机到点成功。
+policy.jsonl：实际角度/速度、反馈力矩、动作、参考、参考速度、模型FK距离。
+bridge/samples.csv：桥逐周期反馈和发送参考。
+bridge/timing.csv、bridge/metadata.json：时序和故障。
+distance_fk_m只是同一模型根据编码器计算的距离，不能作为外部真实末端精度测量。
+
+七、检查失败怎么处理
+配置/模型哈希不符：核对Ubuntu实际训练文件，不修改contract.json强行通过。
+编译失败：保留报错，检查Ubuntu的CMake、g++和nlohmann-json3-dev；不自动安装软件。
+起点不符：使用已有定位方法准备A，不扩大起点容差。
+保持失败：先解决实机起点保持，不能通过取消检查进入策略。
+40ms超时：检查timing.csv，不直接放宽保护时间。
+力矩/速度/跟踪报警：检查记录，不提高报警上限来继续。
+若第一阶段无法通过，将session.json和bridge日志带回分析，不重复盲试。
+
+八、验证边界
+本包提供离线数值测试；未在用户Ubuntu编译/连接CAN/运行实机。
+现有正式policy.zip未包含在交接包，需在Ubuntu由inspect完成真实权重和合同核对。
