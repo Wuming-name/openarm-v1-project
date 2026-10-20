@@ -1,0 +1,110 @@
+OpenArm V1：自动准备起点A，再运行现有PPO策略
+版本：autostart-v3，2026-10-19
+
+一、功能
+不再要求每次手动精确摆到A。
+程序从“零位附近”或“A附近”的静止停放状态开始：
+只读检查 -> 失能时预置有界保持参考 -> 使能 -> 平滑移动到A ->
+有界参考微调 -> 编码器实际到位并停稳1秒 -> 保持验证5秒 -> RL接管。
+自动起点阶段不运行RL；不会更改电机零点、参数或训练配置。
+
+训练起点：A=[0,0,0,0.4,0,0,0]rad。
+只支持两类初始姿态：
+1. 零位附近：J1/J2/J3/J5/J6/J7各在±0.03rad，J4反馈在[-0.005,0.06]rad。
+2. A附近：每个关节与A的差不超过0.08rad。
+当前J4=-0.002098rad符合第一类的J4条件，其余六关节也需检查通过。
+不是从任意姿态自动回零。超出初始区域会拒绝使能，不会自动放宽范围。
+
+二、安装
+将整个openarm_v2_autostart_20261019文件夹复制到Ubuntu：
+/home/lsk/openarm_v1_ws/src/openarm-v1-project/tools/openarm_v2_autostart_20261019
+与旧trial包并列，不要覆盖旧包或训练包。
+依赖复用训练虚拟环境，不需要重新训练或复制权重。
+固定使用policy SHA256：e56c2e17c48c2fa2157661be8f842d3b03cde96869eb90b01d24efbd4ca663b3。
+
+三、启动前的物理状态
+机械臂上电、静止，电机报告失能；位于上述允许的停放区域即可，无需精确手动摆A。
+退出所有其他电机控制/查询工具；使用已经配置好的CAN-FD接口。
+确保从当前姿态到A的整个路径没有人、桌面或其他障碍物。
+预备急停及能承接负载的防坠措施。运行期间不要用手限制连杆、不要让支撑阻挡运动。
+如果机械臂在失能状态下不能稳定停放，应先解决停放/支撑，不能依赖本程序防止上电前下落。
+使能前仅预置保持参考，保持参考由模型估计，仍可能不准确；独立反馈保护不能保证不发生下落。
+
+四、Ubuntu终端一次设置变量
+cd /home/lsk/openarm_v1_ws/src/openarm-v1-project/tools/openarm_rl_reach_sim
+RL_PY=/home/lsk/openarm_v1_ws/src/openarm-v1-project/tools/openarm_rl_reach/.venv/bin/python
+AUTO=/home/lsk/openarm_v1_ws/src/openarm-v1-project/tools/openarm_v2_autostart_20261019/autostart.py
+RUN=/home/lsk/openarm_v1_ws/src/openarm-v1-project/tools/openarm_rl_reach_sim/runs/goal14cm_resume_20261019_105544
+
+五、按顺序执行
+1. 离线合同检查并模拟自动起点，不打开CAN，不需要机械臂上电：
+"$RL_PY" "$AUTO" inspect --config config.sim.json --run "$RUN"
+会用Ubuntu实际MuJoCo版本和模型，模拟J4=-0.002098附近到A。
+检查失败时不要进入下一步，保留完整输出。模型测试通过不代表实机已验证。
+
+2. 在允许的停放区域做30秒只读测试，无需手动摆A：
+"$RL_PY" "$AUTO" shadow --config config.sim.json --run "$RUN" --interface can0
+自动编译本机C++桥，读取参数与反馈，运行推理/模型检查，不使能、不发送MIT运动目标。
+实际接口不是can0时，所有命令统一使用实际名称。
+
+3. 第一次只验证自动准备起点，不运行RL：
+"$RL_PY" "$AUTO" home-test --config config.sim.json --run "$RUN" --interface can0 --execute
+输入RUN_AUTO_HOME开始。
+程序自己预置静态保持目标、使能、移动到A，不需要手动移动到0.4rad，也没有RELEASED步骤。
+从零附近出发，名义参考轨迹约44秒；允许额外30秒有界微调，再验证停稳及保持。
+终端约每秒显示阶段、q4实际值和最大A误差。
+到A并稳定后出现A_STABLE，继续保持测试5秒。
+完成后显示HOLD：先安装承重支撑，再输入SUPPORTED，程序尝试失能并退出。
+如果失败，RL不会启动；不要提高阈值或强行用手维持来通过测试。
+
+4. 自动起点验证通过后，用当前权重做5秒试验：
+"$RL_PY" "$AUTO" trial --config config.sim.json --run "$RUN" --interface can0 --seconds 5 --execute
+输入RUN_AUTO_RL开始。
+程序重新检查实际初始姿态，自动准备A，并再次验证保持5秒，之后出现RL_STARTED。
+RL最多运行5秒，随后停止策略、平滑降低参考速度并保持。
+安装承重支撑后输入SUPPORTED退出。正常结束不自动回A或零位。
+
+5. 检查5秒实机结果后，后续可选择最多15秒：
+"$RL_PY" "$AUTO" trial --config config.sim.json --run "$RUN" --interface can0 --seconds 15 --execute
+每次仍需从允许的静止停放区域开始；若上次停止姿态不在这两个区域，本版本拒绝任意姿态归位。
+5秒只观察初始运动。仿真约14秒进入目标区；实机15秒并不保证到点。
+
+六、停止与保护
+STOP加回车：有序停止参考运动并保持；不是急停替代品。
+SUPPORTED只在HOLD阶段接受，必须先安装承重支撑。
+不要直接关闭控制终端。Ctrl+C、进程退出、通信故障和超时均可能导致失能尝试及重力下落。
+自动起点保护模式总时长最多180秒，包括失败后的等待支撑；正常切换后等待支撑最多300秒。
+起点反馈的小负值容许仅用于J4启动区域：下限-0.005rad，不改变零位或训练q_min。
+J4预期目标角不小于0；一旦反馈进入0.04rad以上，不再容许负反馈区域。
+其他关节保护不变。切换RL前恢复正常参考行程边距。
+实际到A要求：每关节误差<=0.005rad，实际速度<配置success_speed，参考停止，持续50个20ms周期。
+参考微调只在模型保持参考的±0.03rad内、最高0.003rad/s；不持续无界积分。
+参考更新仍保留0.02rad/s和0.04rad/s²上限。保持原有力矩/速度/温度/跟踪/碰撞及40ms时序保护。
+启动前失能预置PD参考是唯一不走运动参考斜坡的阶段：目标偏差、预测力矩均单独检查。
+预置后先验证仍失能且姿态未变，再发使能命令。
+MIT速度/前馈字段均为0，保持原编码方式。角度参考偏置不是运行期前馈力矩。
+进入RL时保留实际使用的保持参考，参考速度为0；不把参考重置为实际角度。
+
+七、结果目录
+/home/lsk/experiments/rl_v2_autostart/
+session.json：结果、起点、A到位状态、权重与源文件哈希。
+policy.jsonl：阶段、实际q/dq、反馈力矩、动作、参考/参考速度、模型FK距离。
+bridge/samples.csv：逐周期反馈与实际下发参考。
+bridge/metadata.json、bridge/timing.csv：参数、首次原始反馈、故障、时序。
+通过凭据一小时有效，严格匹配权重/模型/配置/接口/源码；旧trial包凭据不可混用。
+passed只代表对应试验阶段完成，未把仿真成功率0改成通过，也未证明真实末端精度。
+
+八、验证边界
+助手在Windows、MuJoCo3.14.0用用户模型做了自动起点仿真及数值测试。
+用户Ubuntu训练环境是另一版本，应先运行inspect中的本机起点仿真。
+尚未在用户Ubuntu编译本次新增C++启动流程，尚未实机执行本程序。
+真实权重只在Ubuntu，由inspect核对；模型与电机反馈仍有未辨识差异。
+
+九、文件作用
+autostart.py：自动起点/保持/RL切换与日志。
+startup_control.py：初始区域、模型筛选、平滑轨迹、有界微调。
+session_io.py：权重与合同核对、编译及IPC。
+sim_core.py：交接包原始sim-v2控制/观测代码，保持不变。
+can_bridge.cpp：CAN-FD、独立时序/阈值/起点切换保护。
+simulate_startup.py：纯仿真验证自动起点。
+test_autostart.py：离线数值与模型测试，不访问CAN。

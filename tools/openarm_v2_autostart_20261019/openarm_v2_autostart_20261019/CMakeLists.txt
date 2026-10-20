@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.16)
+project(openarm_rl_reach LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+find_package(nlohmann_json REQUIRED)
+find_package(Threads REQUIRED)
+add_executable(can_bridge can_bridge.cpp)
+target_link_libraries(can_bridge PRIVATE nlohmann_json::nlohmann_json Threads::Threads)
+target_compile_options(can_bridge PRIVATE -Wall -Wextra -O2)
